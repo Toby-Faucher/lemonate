@@ -7,6 +7,10 @@ impl Square {
         // from_coords(9,10) = from_coords(1,2) instead of panicing
         Square((rank & 7) * 8 + (file & 7))
     }
+    
+    pub const fn from_index(index: usize) -> Self {
+        Square(index as u8)
+    }
     pub const fn file(self) -> u8 {
         self.0 & 7
     }
