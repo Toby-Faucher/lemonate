@@ -1,6 +1,6 @@
 use crate::bitboard::Bitboard;
-use crate::types::PieceType;
 use crate::bitboard::Square;
+use crate::types::PieceType;
 
 fn generate_ray(square: Square, file_delta: i8, rank_delta: i8, mask: &mut Bitboard) {
     let mut cf = square.file() as i8;
@@ -9,7 +9,7 @@ fn generate_ray(square: Square, file_delta: i8, rank_delta: i8, mask: &mut Bitbo
         cf += file_delta;
         cr += rank_delta;
 
-        if matches!(cf, 0 | 7) || matches!(cr, 0 | 7) {
+        if !(0..=7).contains(&cf) || !(0..=7).contains(&cr) || matches!(cf, 0 | 7) || matches!(cr, 0 | 7) {
             break;
         }
 
@@ -18,7 +18,38 @@ fn generate_ray(square: Square, file_delta: i8, rank_delta: i8, mask: &mut Bitbo
     }
 }
 
-fn generate_occupancy_mask(square: Square, piece_type: PieceType) -> Bitboard {
+pub fn generate_sliding_attacks(
+    square: Square,
+    directions: &[(i8, i8)],
+    blockers: Bitboard,
+) -> Bitboard {
+    let mut attacks = Bitboard::EMPTY;
+
+    for &(df, dr) in directions {
+        let mut f = square.file() as i8;
+        let mut r = square.rank() as i8;
+
+        loop {
+            f += df;
+            r += dr;
+
+            if !(0..=7).contains(&f) || !(0..=7).contains(&r) {
+                break;
+            }
+
+            let target = Square::from_coords(f as u8, r as u8);
+            attacks.set(target);
+
+            if blockers.is_set(target) {
+                break;
+            }
+        }
+    }
+
+    attacks
+}
+
+pub fn generate_occupancy_mask(square: Square, piece_type: PieceType) -> Bitboard {
     let mut mask = Bitboard::EMPTY;
 
     match piece_type {
