@@ -1,10 +1,11 @@
-use std::iter;
+use std::usize;
 
 use crate::bitboard::Bitboard;
 use crate::bitboard::Square;
 use crate::masks::*;
 use crate::piece::PieceType;
 use crate::Magic;
+use crate::{init_bishop_magics, init_rook_magics};
 
 pub struct AttackTable {
     pub rook_attacks: Box<[Bitboard]>,
@@ -28,6 +29,49 @@ pub fn generate_blocker_board(index: usize, mask: Bitboard) -> Bitboard {
     }
 
     blockers
+}
+
+impl AttackTable {
+    pub fn new() -> Self {
+        println!("Initialing magic attack tables");
+
+        let rook_magics = init_rook_magics();
+        let bishop_magics = init_bishop_magics();
+
+        let rook_attacks = build_rook_table(&rook_magics);
+        let bishop_attacks = build_bishop_table(&bishop_magics);
+
+        println!("Attck tables initialized");
+
+        Self {
+            rook_attacks,
+            bishop_attacks,
+            rook_magics,
+            bishop_magics,
+        }
+    }
+
+    pub fn rook_attacks(&self, square: Square, blockers: Bitboard) -> Bitboard {
+        let magic = &self.rook_magics[square.index()];
+        let hash = magic.hash(blockers);
+        self.rook_attacks[magic.offset as usize + hash]
+    }
+
+    pub fn bishop_attacks(&self, square: Square, blockers: Bitboard) -> Bitboard {
+        let magic = &self.bishop_magics[square.index()];
+        let hash = magic.hash(blockers);
+        self.bishop_attacks[magic.offset as usize + hash]
+    }
+
+    pub fn queen_attacks(&self, square: Square, blockers: Bitboard) -> Bitboard {
+        self.rook_attacks(square, blockers) | self.bishop_attacks(square, blockers)
+    }
+}
+
+impl Default for AttackTable {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 pub fn generate_rook_mask(square: Square) -> Bitboard {

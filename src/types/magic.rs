@@ -4,7 +4,7 @@ use crate::{
     generate_rook_mask, Bitboard,
 };
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub struct Magic {
     pub mask: Bitboard,
     pub magic: u64,
@@ -25,6 +25,10 @@ impl Magic {
 
     pub fn hash(&self, blockers: Bitboard) -> usize {
         let relevant = blockers & self.mask;
+
+        if self.shift >= 64 {
+            return 0;
+        }
 
         let hash = relevant.0.wrapping_mul(self.magic) >> self.shift;
 
@@ -66,7 +70,6 @@ pub fn find_magic(square: Square, mask: Bitboard, is_rook: bool) -> u64 {
     let num_patterns = 1 << n_bits;
 
     let mut blockers = Vec::new();
-
     let mut attacks = Vec::new();
 
     for i in 0..num_patterns {
@@ -84,7 +87,21 @@ pub fn find_magic(square: Square, mask: Bitboard, is_rook: bool) -> u64 {
     let mut rng = MagicRng::new(square.index() as u64 + 12345);
     let mut used = vec![None; num_patterns];
 
+    const MAX_ATTEMPTS: usize = 100_000_000;
+    let mut attempts = 0;
+
     'search: loop {
+        attempts += 1;
+        if attempts > MAX_ATTEMPTS {
+            panic!(
+                "Failed to find magic number for {} square {} after {} attempts. Mask has {} bits.",
+                if is_rook { "rook" } else { "bishop" },
+                square.index(),
+                MAX_ATTEMPTS,
+                n_bits
+            );
+        }
+
         let magic = rng.sparse();
 
         if ((mask.0.wrapping_mul(magic)) >> 56).count_ones() < 6 {
@@ -102,6 +119,16 @@ pub fn find_magic(square: Square, mask: Bitboard, is_rook: bool) -> u64 {
                 Some(_) => continue 'search,
             }
         }
+
+        if attempts > 1000 {
+            println!(
+                "Found magic for {} square {} after {} attempts",
+                if is_rook { "rook" } else { "bishop" },
+                square.index(),
+                attempts
+            );
+        }
+
         return magic;
     }
 }
@@ -147,6 +174,18 @@ pub fn init_rook_magics() -> [Magic; 64] {
     for sq_idx in 0..64 {
         let square = Square::from_index(sq_idx);
         let mask = generate_rook_mask(square);
+
+        if mask.count_pieces() == 0 {
+            // Corner squares have empty masks - they don't need magic numbers
+            magics[sq_idx] = Magic {
+                mask: Bitboard::EMPTY,
+                magic: 0,
+                shift: 64,
+                offset,
+            };
+            continue;
+        }
+
         let magic_number = find_magic(square, mask, true); // true = rook
 
         magics[sq_idx] = Magic {

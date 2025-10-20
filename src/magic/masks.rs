@@ -5,11 +5,18 @@ use crate::types::PieceType;
 fn generate_ray(square: Square, file_delta: i8, rank_delta: i8, mask: &mut Bitboard) {
     let mut cf = square.file() as i8;
     let mut cr = square.rank() as i8;
+    
     loop {
         cf += file_delta;
         cr += rank_delta;
 
-        if !(0..=7).contains(&cf) || !(0..=7).contains(&cr) || matches!(cf, 0 | 7) || matches!(cr, 0 | 7) {
+        // Stop if we go off the board
+        if !(0..=7).contains(&cf) || !(0..=7).contains(&cr) {
+            break;
+        }
+
+        // For occupancy masks, exclude edge squares since they can't block
+        if matches!(cf, 0 | 7) || matches!(cr, 0 | 7) {
             break;
         }
 
