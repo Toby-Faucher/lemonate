@@ -143,6 +143,7 @@ pub fn init_bishop_magics() -> [Magic; 64] {
 
     let mut offset = 0;
 
+    #[allow(clippy::needless_range_loop)]
     for sq_idx in 0..64 {
         let square = Square::from_index(sq_idx);
         let mask = generate_bishop_mask(square);
@@ -171,6 +172,7 @@ pub fn init_rook_magics() -> [Magic; 64] {
 
     let mut offset = 0;
 
+    #[allow(clippy::needless_range_loop)]
     for sq_idx in 0..64 {
         let square = Square::from_index(sq_idx);
         let mask = generate_rook_mask(square);

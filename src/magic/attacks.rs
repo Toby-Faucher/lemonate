@@ -1,15 +1,17 @@
-use std::usize;
-
 use crate::bitboard::Bitboard;
 use crate::bitboard::Square;
 use crate::masks::*;
-use crate::piece::PieceType;
+use crate::piece::{Color, PieceType};
 use crate::Magic;
 use crate::{init_bishop_magics, init_rook_magics};
 
 pub struct AttackTable {
     pub rook_attacks: Box<[Bitboard]>,
     pub bishop_attacks: Box<[Bitboard]>,
+    pub knight_attacks: [Bitboard; 64],
+    pub king_attacks: [Bitboard; 64],
+    pub white_pawn_attacks: [Bitboard; 64],
+    pub black_pawn_attacks: [Bitboard; 64],
     pub rook_magics: [Magic; 64],
     pub bishop_magics: [Magic; 64],
 }
@@ -40,14 +42,22 @@ impl AttackTable {
 
         let rook_attacks = build_rook_table(&rook_magics);
         let bishop_attacks = build_bishop_table(&bishop_magics);
+        let knight_attacks = init_knight_attacks();
+        let king_attacks = init_king_attacks();
+
+        let pawn_attacks = init_pawn_attacks();
 
         println!("Attck tables initialized");
 
         Self {
             rook_attacks,
             bishop_attacks,
+            knight_attacks,
+            king_attacks,
             rook_magics,
             bishop_magics,
+            white_pawn_attacks: pawn_attacks.0,
+            black_pawn_attacks: pawn_attacks.1,
         }
     }
 
@@ -63,8 +73,23 @@ impl AttackTable {
         self.bishop_attacks[magic.offset as usize + hash]
     }
 
+    pub fn knight_attacks(&self, square: Square) -> Bitboard {
+        self.knight_attacks[square.index()]
+    }
+
+    pub fn king_attacks(&self, square: Square) -> Bitboard {
+        self.king_attacks[square.index()]
+    }
+
     pub fn queen_attacks(&self, square: Square, blockers: Bitboard) -> Bitboard {
         self.rook_attacks(square, blockers) | self.bishop_attacks(square, blockers)
+    }
+
+    pub fn pawn_attacks(&self, square: Square, color: Color) -> Bitboard {
+        match color {
+            Color::White => self.white_pawn_attacks[square.index()],
+            Color::Black => self.black_pawn_attacks[square.index()],
+        }
     }
 }
 
@@ -138,4 +163,101 @@ fn build_bishop_table(magics: &[Magic; 64]) -> Box<[Bitboard]> {
     }
 
     table
+}
+
+fn init_knight_attacks() -> [Bitboard; 64] {
+    let mut attacks = [Bitboard::EMPTY; 64];
+
+    const KNIGHT_MOVES: [(i8, i8); 8] = [
+        (2, 1),
+        (2, -1),
+        (-2, 1),
+        (-2, -1),
+        (1, 2),
+        (1, -2),
+        (-1, 2),
+        (-1, -2),
+    ];
+
+    for sq_idx in 0..64 {
+        let square = Square::from_index(sq_idx);
+        let (rank, file) = (square.rank() as i8, square.file() as i8);
+
+        for &(dr, df) in &KNIGHT_MOVES {
+            let new_rank = rank + dr;
+            let new_file = file + df;
+
+            if (0..8).contains(&new_rank) && (0..8).contains(&new_file) {
+                let target = Square::from_coords(new_file as u8, new_rank as u8);
+                attacks[sq_idx].set(target);
+            }
+        }
+    }
+    attacks
+}
+
+pub fn init_king_attacks() -> [Bitboard; 64] {
+    let mut attacks = [Bitboard::EMPTY; 64];
+    const KING_MOVES: [(i8, i8); 8] = [
+        (1, 0),
+        (-1, 0),
+        (0, 1),
+        (0, -1),
+        (1, 1),
+        (1, -1),
+        (-1, 1),
+        (-1, -1),
+    ];
+
+    for square_idx in 0..64 {
+        let square = Square::from_index(square_idx);
+        let (rank, file) = (square.rank() as i8, square.file() as i8);
+
+        for &(dr, df) in &KING_MOVES {
+            let new_rank = rank + dr;
+            let new_file = file + df;
+
+            if (0..8).contains(&new_rank) && (0..8).contains(&new_file) {
+                let target = Square::from_coords(new_file as u8, new_rank as u8);
+                attacks[square_idx].set(target);
+            }
+        }
+    }
+    attacks
+}
+
+pub fn init_pawn_attacks() -> ([Bitboard; 64], [Bitboard; 64]) {
+    let mut white_attacks = [Bitboard::EMPTY; 64];
+    let mut black_attacks = [Bitboard::EMPTY; 64];
+
+    for square_idx in 0..64 {
+        let square = Square::from_index(square_idx);
+        let (rank, file) = (square.rank() as i8, square.file() as i8);
+
+        // White pawn attacks (moving up)
+        if rank < 7 {
+            if file > 0 {
+                let target = Square::from_coords((file - 1) as u8, (rank + 1) as u8);
+                white_attacks[square_idx].set(target);
+            }
+            if file < 7 {
+                let target = Square::from_coords((file + 1) as u8, (rank + 1) as u8);
+                white_attacks[square_idx].set(target);
+            }
+        }
+
+        // Black pawn attacks (moving down)
+        if rank > 0 {
+            if file > 0 {
+                let target = Square::from_coords((file - 1) as u8, (rank - 1) as u8);
+                black_attacks[square_idx].set(target);
+            }
+            if file < 7 {
+                let target = Square::from_coords((file + 1) as u8, (rank - 1) as u8);
+                black_attacks[square_idx].set(target);
+            }
+        }
+    }
+
+    (white_attacks, black_attacks)
 }
