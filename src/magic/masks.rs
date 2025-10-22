@@ -1,5 +1,5 @@
 use crate::bitboard::Bitboard;
-use crate::bitboard::Square;
+use crate::types::Square;
 use crate::types::PieceType;
 
 fn generate_ray(square: Square, file_delta: i8, rank_delta: i8, mask: &mut Bitboard) {

@@ -1,5 +1,5 @@
 use crate::bitboard::Bitboard;
-use crate::bitboard::Square;
+use crate::types::Square;
 use crate::masks::*;
 use crate::types::{Color, PieceType};
 use crate::Magic;
