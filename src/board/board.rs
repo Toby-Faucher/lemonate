@@ -1,5 +1,6 @@
 use crate::bitboard::Bitboard;
 use crate::square::Square;
+use crate::types::castling::CastlingRights;
 use crate::types::Color;
 
 #[derive(Clone, Debug)]
@@ -15,15 +16,6 @@ pub struct Board {
     fullmove_number: u16,
 
     position_hash: u64,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct CastlingRights {
-    pub white_kingside: bool,
-    pub white_queenside: bool,
-
-    pub black_kingside: bool,
-    pub black_queenside: bool,
 }
 
 impl Board {
