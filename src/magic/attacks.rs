@@ -1,7 +1,7 @@
 use crate::bitboard::Bitboard;
 use crate::bitboard::Square;
 use crate::masks::*;
-use crate::piece::{Color, PieceType};
+use crate::types::{Color, PieceType};
 use crate::Magic;
 use crate::{init_bishop_magics, init_rook_magics};
 

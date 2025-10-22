@@ -1,6 +1,6 @@
 use crate::bitboard::Bitboard;
 use crate::square::Square;
-use crate::types::{Color, Piece, PieceType};
+use crate::types::Color;
 
 #[derive(Clone, Debug)]
 pub struct Board {
