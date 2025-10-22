@@ -1,8 +1,8 @@
+use crate::Magic;
 use crate::bitboard::Bitboard;
 use crate::masks::*;
 use crate::types::Square;
 use crate::types::{Color, PieceType};
-use crate::Magic;
 use crate::{init_bishop_magics, init_rook_magics};
 
 pub struct AttackTable {

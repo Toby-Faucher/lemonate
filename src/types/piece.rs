@@ -1,4 +1,4 @@
-use crate::types::color::Color;
+use crate::{FenError, types::color::Color};
 
 #[derive(Clone, Copy, Debug)]
 pub enum PieceType {
@@ -14,4 +14,10 @@ pub enum PieceType {
 pub struct Piece {
     pub piece_type: PieceType,
     pub color: Color,
+}
+
+impl Piece {
+    fn from_fen_char(ch: char) -> Result<Self, FenError> {
+        unimplemented!()
+    }
 }

@@ -1,11 +1,11 @@
 use crate::bitboard::Bitboard;
-use crate::types::Square;
 use crate::types::PieceType;
+use crate::types::Square;
 
 fn generate_ray(square: Square, file_delta: i8, rank_delta: i8, mask: &mut Bitboard) {
     let mut cf = square.file() as i8;
     let mut cr = square.rank() as i8;
-    
+
     loop {
         cf += file_delta;
         cr += rank_delta;

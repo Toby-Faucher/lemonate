@@ -1,6 +1,6 @@
 use lemonate::magic::attacks::AttackTable;
-use lemonate::types::color::Color;
 use lemonate::types::Square;
+use lemonate::types::color::Color;
 
 fn main() {
     println!("=== AttackTable Tests ===\n");

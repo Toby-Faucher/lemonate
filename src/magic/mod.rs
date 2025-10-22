@@ -1,8 +1,8 @@
 pub mod attacks;
 pub mod masks;
 
-use crate::types::Square;
 use crate::Bitboard;
+use crate::types::Square;
 
 pub use attacks::*;
 pub use masks::*;
