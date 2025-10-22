@@ -1,3 +1,5 @@
+use super::color::Color;
+
 #[derive(Clone, Copy, Debug)]
 pub enum PieceType {
     Pawn,
@@ -6,12 +8,6 @@ pub enum PieceType {
     Rook,
     Queen,
     King,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub enum Color {
-    White,
-    Black,
 }
 
 #[derive(Clone, Copy, Debug)]
