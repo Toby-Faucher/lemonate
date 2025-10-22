@@ -1,6 +1,6 @@
 use crate::bitboard::Bitboard;
-use crate::types::Square;
 use crate::masks::*;
+use crate::types::Square;
 use crate::types::{Color, PieceType};
 use crate::Magic;
 use crate::{init_bishop_magics, init_rook_magics};
@@ -179,7 +179,7 @@ fn init_knight_attacks() -> [Bitboard; 64] {
         (-1, -2),
     ];
 
-    for sq_idx in 0..64 {
+    for (sq_idx, attack) in attacks.iter_mut().enumerate() {
         let square = Square::from_index(sq_idx);
         let (rank, file) = (square.rank() as i8, square.file() as i8);
 
@@ -189,7 +189,7 @@ fn init_knight_attacks() -> [Bitboard; 64] {
 
             if (0..8).contains(&new_rank) && (0..8).contains(&new_file) {
                 let target = Square::from_coords(new_file as u8, new_rank as u8);
-                attacks[sq_idx].set(target);
+                attack.set(target);
             }
         }
     }
@@ -209,8 +209,8 @@ pub fn init_king_attacks() -> [Bitboard; 64] {
         (-1, -1),
     ];
 
-    for square_idx in 0..64 {
-        let square = Square::from_index(square_idx);
+    for (sq_idx, attack) in attacks.iter_mut().enumerate() {
+        let square = Square::from_index(sq_idx);
         let (rank, file) = (square.rank() as i8, square.file() as i8);
 
         for &(dr, df) in &KING_MOVES {
@@ -219,7 +219,7 @@ pub fn init_king_attacks() -> [Bitboard; 64] {
 
             if (0..8).contains(&new_rank) && (0..8).contains(&new_file) {
                 let target = Square::from_coords(new_file as u8, new_rank as u8);
-                attacks[square_idx].set(target);
+                attack.set(target);
             }
         }
     }

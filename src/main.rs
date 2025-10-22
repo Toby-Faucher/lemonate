@@ -1,6 +1,6 @@
-use lemonate::bitboard::{Bitboard, Square};
 use lemonate::magic::attacks::AttackTable;
-use lemonate::types::piece::Color;
+use lemonate::types::color::Color;
+use lemonate::types::Square;
 
 fn main() {
     println!("=== AttackTable Tests ===\n");
