@@ -1,4 +1,4 @@
-use crate::bitboard::Square;
+use crate::types::Square;
 use crate::{
     calculate_bishop_attacks, calculate_rook_attacks, generate_bishop_mask, generate_blocker_board,
     generate_rook_mask, Bitboard,

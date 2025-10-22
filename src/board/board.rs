@@ -1,5 +1,5 @@
 use crate::bitboard::Bitboard;
-use crate::square::Square;
+use crate::types::Square;
 use crate::types::castling::CastlingRights;
 use crate::types::Color;
 

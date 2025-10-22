@@ -1,4 +1,4 @@
-use crate::square::Square;
+use crate::types::Square;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct Bitboard(pub u64);
