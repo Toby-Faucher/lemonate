@@ -1,4 +1,4 @@
-use super::color::Color;
+use crate::types::color::Color;
 
 #[derive(Clone, Copy, Debug)]
 pub enum PieceType {
