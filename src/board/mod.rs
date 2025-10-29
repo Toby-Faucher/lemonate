@@ -1,9 +1,9 @@
-use crate::Piece;
-use crate::PieceType;
 use crate::bitboard::Bitboard;
+use crate::types::castling::CastlingRights;
 use crate::types::Color;
 use crate::types::Square;
-use crate::types::castling::CastlingRights;
+use crate::Piece;
+use crate::PieceType;
 
 mod zobrist;
 use zobrist::zobrist_piece_hash;
