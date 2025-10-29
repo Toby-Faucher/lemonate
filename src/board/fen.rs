@@ -1,4 +1,4 @@
-use crate::{Board, CastlingRights, Color, FenError, Square};
+use crate::{Board, CastlingRights, Color, FenError, Piece, Square};
 impl Board {
     pub fn from_fen(fen: &str) -> Result<Self, FenError> {
         let parts: Vec<&str> = fen.split_whitespace().collect();
@@ -34,6 +34,39 @@ impl Board {
     }
 
     fn parse_piece_placement(&mut self, placement: &str) -> Result<(), FenError> {
-        unimplemented!()
+        let ranks: Vec<&str> = placement.split('/').collect();
+
+        if ranks.len() != 8 {
+            return Err(FenError::InvalidPiecePlacement);
+        }
+
+        for (rank_idx, rank_str) in ranks.iter().enumerate() {
+            let rank = 7 - rank_idx;
+            let mut file = 0;
+
+            for ch in rank_str.chars() {
+                if ch.is_ascii_digit() {
+                    let empty_count = ch.to_digit(10).unwrap() as u8;
+                    file += empty_count;
+                } else {
+                    let piece = Piece::from_fen_char(ch)?;
+
+                    let square = Square::from_coords(file, rank as u8);
+
+                    self.place_piece(square, piece);
+
+                    file += 1;
+                }
+
+                if file > 8 {
+                    return Err(FenError::InvalidPiecePlacement);
+                }
+            }
+            if file != 8 {
+                return Err(FenError::InvalidPiecePlacement);
+            }
+        }
+
+        Ok(())
     }
 }

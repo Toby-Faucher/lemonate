@@ -1,4 +1,4 @@
-use crate::{FenError, types::color::Color};
+use crate::{types::color::Color, FenError};
 
 #[derive(Clone, Copy, Debug)]
 pub enum PieceType {
@@ -17,7 +17,22 @@ pub struct Piece {
 }
 
 impl Piece {
-    fn from_fen_char(ch: char) -> Result<Self, FenError> {
-        unimplemented!()
+    pub fn from_fen_char(ch: char) -> Result<Self, FenError> {
+        let color = if ch.is_uppercase() {
+            Color::White
+        } else {
+            Color::Black
+        };
+
+        let piece_type = match ch.to_ascii_lowercase() {
+            'p' => PieceType::Pawn,
+            'n' => PieceType::Knight,
+            'b' => PieceType::Bishop,
+            'r' => PieceType::Rook,
+            'q' => PieceType::Queen,
+            'k' => PieceType::King,
+            _ => return Err(FenError::InvalidPiece),
+        };
+        Ok(Piece { piece_type, color })
     }
 }
