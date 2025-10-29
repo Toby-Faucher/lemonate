@@ -64,7 +64,7 @@ impl Bitboard {
         if self.0 == 0 {
             None
         } else {
-            Some(Square::from_index(self.0.leading_zeros() as usize))
+            Some(Square::from_index(self.0.trailing_zeros() as usize))
         }
     }
 }
