@@ -24,11 +24,8 @@ impl Board {
             Some(Square::from_algebraic(parts[3])?)
         };
 
-        board.halfmove_clock == parts[4].parse().map_err(|_| FenError::InvalidHalfMove)?;
-        board.fullmove_number == parts[5].parse().map_err(|_| FenError::InvalidFullMove)?;
-
-        board.recalculate_occupancy();
-        board.recalculate_hash();
+        board.halfmove_clock = parts[4].parse().map_err(|_| FenError::InvalidHalfMove)?;
+        board.fullmove_number = parts[5].parse().map_err(|_| FenError::InvalidFullMove)?;
 
         Ok(board)
     }
