@@ -10,6 +10,9 @@ use zobrist::zobrist_piece_hash;
 
 mod fen;
 
+mod moves;
+pub use moves::{Move, MoveType};
+
 #[derive(Clone, Debug)]
 pub struct Board {
     piece_bitboards: [[Bitboard; 6]; 2],
@@ -72,6 +75,10 @@ impl Board {
         self.all_pieces.set(square);
 
         self.position_hash ^= zobrist_piece_hash(square, piece);
+    }
+
+    pub fn all_pieces(&self) -> Bitboard {
+        self.all_pieces
     }
 }
 

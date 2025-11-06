@@ -15,13 +15,18 @@ fn generate_ray(square: Square, file_delta: i8, rank_delta: i8, mask: &mut Bitbo
             break;
         }
 
-        // For occupancy masks, exclude edge squares since they can't block
-        if matches!(cf, 0 | 7) || matches!(cr, 0 | 7) {
-            break;
-        }
-
         let new_square = Square::from_coords(cf as u8, cr as u8);
-        mask.set(new_square);
+
+        // For occupancy masks, exclude the last square in the ray (edge squares)
+        // since a piece there doesn't change what squares before it are attacked
+        // Check if next square would be off the board
+        let next_f = cf + file_delta;
+        let next_r = cr + rank_delta;
+
+        if (0..=7).contains(&next_f) && (0..=7).contains(&next_r) {
+            // Not the last square in this direction, include it in the mask
+            mask.set(new_square);
+        }
     }
 }
 

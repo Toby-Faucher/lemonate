@@ -48,4 +48,20 @@ impl CastlingRights {
         }
         Ok(rights)
     }
+
+    pub const fn white_kingside(&self) -> bool {
+        self.white_kingside
+    }
+
+    pub const fn white_queenside(&self) -> bool {
+        self.white_queenside
+    }
+
+    pub const fn black_kingside(&self) -> bool {
+        self.black_kingside
+    }
+
+    pub const fn black_queenside(&self) -> bool {
+        self.black_queenside
+    }
 }

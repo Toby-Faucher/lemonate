@@ -124,7 +124,7 @@ pub fn find_magic(square: Square, mask: Bitboard, is_rook: bool) -> u64 {
         }
 
         if attempts > 1000 {
-            println!(
+            eprintln!(
                 "Found magic for {} square {} after {} attempts",
                 if is_rook { "rook" } else { "bishop" },
                 square.index(),

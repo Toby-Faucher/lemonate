@@ -35,7 +35,7 @@ pub fn generate_blocker_board(index: usize, mask: Bitboard) -> Bitboard {
 
 impl AttackTable {
     pub fn new() -> Self {
-        println!("Initialing magic attack tables");
+        eprintln!("Initializing magic attack tables");
 
         let rook_magics = init_rook_magics();
         let bishop_magics = init_bishop_magics();
@@ -47,7 +47,7 @@ impl AttackTable {
 
         let pawn_attacks = init_pawn_attacks();
 
-        println!("Attck tables initialized");
+        eprintln!("Attack tables initialized");
 
         Self {
             rook_attacks,
@@ -120,7 +120,7 @@ pub fn calculate_bishop_attacks(square: Square, blockers: Bitboard) -> Bitboard 
 fn build_rook_table(magics: &[Magic; 64]) -> Box<[Bitboard]> {
     let total_size: usize = magics.iter().map(|m| m.table_size()).sum();
 
-    println!("Rook table size: {} entries", total_size);
+    eprintln!("Rook table size: {} entries", total_size);
 
     let mut table = vec![Bitboard::EMPTY; total_size].into_boxed_slice();
 
@@ -144,7 +144,7 @@ fn build_rook_table(magics: &[Magic; 64]) -> Box<[Bitboard]> {
 fn build_bishop_table(magics: &[Magic; 64]) -> Box<[Bitboard]> {
     let total_size: usize = magics.iter().map(|m| m.table_size()).sum();
 
-    println!("Bishop table size: {} entries", total_size);
+    eprintln!("Bishop table size: {} entries", total_size);
 
     let mut table = vec![Bitboard::EMPTY; total_size].into_boxed_slice();
 
