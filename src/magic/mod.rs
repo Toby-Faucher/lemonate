@@ -106,12 +106,29 @@ impl MagicRng {
     fn sparse(&mut self) -> u64 {
         self.next() & self.next() & self.next()
     }
+
+    // Less sparse than sparse(), more sparse than next()
+    fn semi_sparse(&mut self) -> u64 {
+        self.next() & self.next()
+    }
 }
 
 pub fn find_magic(square: Square, mask: Bitboard, is_rook: bool) -> u64 {
     let n_bits = mask.count_pieces();
     let shift = 64 - n_bits;
     let num_patterns = 1 << n_bits;
+
+    if square.index() <= 5 {
+        eprintln!(
+            "Finding magic for {} square {} ({}x{}, {} bits in mask, {} patterns)",
+            if is_rook { "rook" } else { "bishop" },
+            square.index(),
+            square.file(),
+            square.rank(),
+            n_bits,
+            num_patterns
+        );
+    }
 
     let mut blockers = Vec::new();
     let mut attacks = Vec::new();
@@ -128,11 +145,19 @@ pub fn find_magic(square: Square, mask: Bitboard, is_rook: bool) -> u64 {
         attacks.push(attack_board);
     }
 
-    let mut rng = MagicRng::new(square.index() as u64 + 12345);
+    // Use a better seed based on square index and mask pattern
+    let seed = (square.index() as u64).wrapping_mul(1103515245).wrapping_add(mask.0);
+    let mut rng = MagicRng::new(seed);
     let mut used = vec![None; num_patterns];
 
     const MAX_ATTEMPTS: usize = 100_000_000;
     let mut attempts = 0;
+
+    // Progressive strategy:
+    // 0-10k: very sparse (3-way AND)
+    // 10k-30k: semi-sparse (2-way AND)
+    // 30k-60k: regular random
+    // 60k+: restart with new seed
 
     'search: loop {
         attempts += 1;
