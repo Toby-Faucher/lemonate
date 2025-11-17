@@ -1,6 +1,6 @@
 use crate::{types::color::Color, FenError};
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PieceType {
     Pawn,
     Knight,
@@ -10,7 +10,7 @@ pub enum PieceType {
     King,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Piece {
     pub piece_type: PieceType,
     pub color: Color,
