@@ -5,6 +5,8 @@ use crate::types::Square;
 use crate::Piece;
 use crate::PieceType;
 
+mod make_move;
+
 mod zobrist;
 use zobrist::zobrist_piece_hash;
 
