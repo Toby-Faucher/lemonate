@@ -1,5 +1,5 @@
-use crate::Piece;
 use crate::types::Square;
+use crate::Piece;
 
 // Zobrist table layout:
 // - Indices 0-767: Piece-square combinations (64 squares * 12 piece types)
