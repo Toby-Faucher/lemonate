@@ -73,28 +73,20 @@ impl Board {
             color,
         };
 
-        // Get all knight attacks from the attack table
         let attacks = ATTACK_TABLE.knight_attacks(from);
 
-        // Filter out squares with friendly pieces
         let friendly = self.color_bitboard[color as usize];
-        let valid_targets = attacks & !friendly;
+        let enemy = self.color_bitboard[color.opposite() as usize];
 
-        // Generate moves for each valid target
-        for to in valid_targets {
-            let captured = self.piece_at(to);
-            let move_type = if captured.is_some() {
-                MoveType::Capture
-            } else {
-                MoveType::Normal
-            };
+        let quiet_targets = attacks & !friendly & !enemy;
 
+        for to in quiet_targets {
             moves.push(Move {
                 from,
                 to,
-                move_type,
+                move_type: MoveType::Normal,
                 piece,
-                captured,
+                captured: None,
             });
         }
     }
