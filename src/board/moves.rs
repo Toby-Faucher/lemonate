@@ -82,7 +82,7 @@ impl Board {
 
         // Generate moves for each valid target
         for to in valid_targets {
-            let captured = self.peice_at(to);
+            let captured = self.piece_at(to);
             let move_type = if captured.is_some() {
                 MoveType::Capture
             } else {
@@ -115,7 +115,7 @@ impl Board {
 
         // Generate moves for each valid target
         for to in valid_targets {
-            let captured = self.peice_at(to);
+            let captured = self.piece_at(to);
             let move_type = if captured.is_some() {
                 MoveType::Capture
             } else {
@@ -148,7 +148,7 @@ impl Board {
 
         // Generate moves for each valid target
         for to in valid_targets {
-            let captured = self.peice_at(to);
+            let captured = self.piece_at(to);
             let move_type = if captured.is_some() {
                 MoveType::Capture
             } else {
@@ -181,7 +181,7 @@ impl Board {
 
         // Generate moves for each valid target
         for to in valid_targets {
-            let captured = self.peice_at(to);
+            let captured = self.piece_at(to);
             let move_type = if captured.is_some() {
                 MoveType::Capture
             } else {
@@ -214,7 +214,7 @@ impl Board {
 
         // Generate normal king moves
         for to in valid_targets {
-            let captured = self.peice_at(to);
+            let captured = self.piece_at(to);
             let move_type = if captured.is_some() {
                 MoveType::Capture
             } else {
@@ -366,7 +366,7 @@ impl Board {
         let capture_targets = attacks & enemy;
 
         for to in capture_targets {
-            let captured = self.peice_at(to);
+            let captured = self.piece_at(to);
 
             // Check if this is a promotion capture
             if to.rank() == promotion_rank {
@@ -540,6 +540,7 @@ impl Board {
         self.piece_bitboards[color as usize][piece_type as usize].clear(mv.from);
         self.color_bitboard[color as usize].clear(mv.from);
         self.all_pieces.clear(mv.from);
+        self.mailbox[mv.from.index()] = None;
 
         // Handle captures
         if let Some(captured) = mv.captured {
@@ -557,6 +558,7 @@ impl Board {
                 .clear(capture_square);
             self.color_bitboard[captured.color as usize].clear(capture_square);
             self.all_pieces.clear(capture_square);
+            self.mailbox[capture_square.index()] = None;
         }
 
         // Place piece on destination square
@@ -568,6 +570,10 @@ impl Board {
         self.piece_bitboards[color as usize][final_piece_type as usize].set(mv.to);
         self.color_bitboard[color as usize].set(mv.to);
         self.all_pieces.set(mv.to);
+        self.mailbox[mv.to.index()] = Some(Piece {
+            piece_type: final_piece_type,
+            color,
+        });
 
         // Handle castling - move the rook
         if mv.move_type == MoveType::Castle {
@@ -595,10 +601,15 @@ impl Board {
             self.piece_bitboards[color as usize][PieceType::Rook as usize].clear(rook_from);
             self.color_bitboard[color as usize].clear(rook_from);
             self.all_pieces.clear(rook_from);
+            self.mailbox[rook_from.index()] = None;
 
             self.piece_bitboards[color as usize][PieceType::Rook as usize].set(rook_to);
             self.color_bitboard[color as usize].set(rook_to);
             self.all_pieces.set(rook_to);
+            self.mailbox[rook_to.index()] = Some(Piece {
+                piece_type: PieceType::Rook,
+                color,
+            });
         }
     }
 }

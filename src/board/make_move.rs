@@ -195,6 +195,7 @@ impl Board {
         self.piece_bitboards[piece.color as usize][piece.piece_type as usize].clear(square);
         self.color_bitboard[piece.color as usize].clear(square);
         self.all_pieces.clear(square);
+        self.mailbox[square.index()] = None;
         self.position_hash ^= zobrist_piece_hash(square, piece);
     }
 
@@ -203,6 +204,7 @@ impl Board {
         self.piece_bitboards[piece.color as usize][piece.piece_type as usize].set(square);
         self.color_bitboard[piece.color as usize].set(square);
         self.all_pieces.set(square);
+        self.mailbox[square.index()] = Some(piece);
     }
 
     /// Remove a piece without updating hash (used in move reversal)
@@ -210,6 +212,7 @@ impl Board {
         self.piece_bitboards[piece.color as usize][piece.piece_type as usize].clear(square);
         self.color_bitboard[piece.color as usize].clear(square);
         self.all_pieces.clear(square);
+        self.mailbox[square.index()] = None;
     }
 
     /// Get rook squares for castling move
