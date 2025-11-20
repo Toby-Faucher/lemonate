@@ -6,6 +6,7 @@ use crate::Piece;
 use crate::PieceType;
 
 mod make_move;
+pub use make_move::BoardState;
 
 mod zobrist;
 use zobrist::zobrist_piece_hash;
@@ -28,6 +29,9 @@ pub struct Board {
     fullmove_number: u16,
 
     position_hash: u64,
+
+    // Move history for make/unmake operations
+    move_history: Option<Vec<(Move, BoardState)>>,
 }
 
 impl Board {
@@ -42,6 +46,7 @@ impl Board {
             halfmove_clock: 0,
             fullmove_number: 1,
             position_hash: 0,
+            move_history: None,
         }
     }
 
@@ -81,6 +86,18 @@ impl Board {
 
     pub fn all_pieces(&self) -> Bitboard {
         self.all_pieces
+    }
+
+    pub fn position_hash(&self) -> u64 {
+        self.position_hash
+    }
+
+    pub fn side_to_move(&self) -> Color {
+        self.side_to_move
+    }
+
+    pub fn piece_bitboard(&self, color: Color, piece_type: PieceType) -> Bitboard {
+        self.piece_bitboards[color as usize][piece_type as usize]
     }
 }
 
