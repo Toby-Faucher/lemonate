@@ -26,7 +26,7 @@ pub enum MoveType {
 
 impl Board {
     pub fn generate_legal_moves(&self) -> Vec<Move> {
-        let mut legal_moves = Vec::new();
+        let mut legal_moves = Vec::with_capacity(218); // 218 is the max amount of moves
 
         let pseudo_legal = self.generate_pseudo_legal_moves();
 
@@ -39,8 +39,7 @@ impl Board {
     }
 
     pub fn generate_pseudo_legal_moves(&self) -> Vec<Move> {
-        let mut moves = Vec::new();
-
+        let mut moves = Vec::with_capacity(256);
         let color = self.side_to_move;
         let color_idx = color as usize;
 
