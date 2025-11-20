@@ -1,230 +1,236 @@
-use lemonate::board::{Board, MoveType};
-use lemonate::types::{PieceType, Square};
+use lemonate::board::{Board, Move, MoveType};
+use lemonate::types::{Color, PieceType, Square};
+use std::io::{self, Write};
 
 fn main() {
-    println!("=== Board Tests ===\n");
+    println!("=== Lemonate Chess Engine ===\n");
 
-    // Test 1: Create board from starting position FEN
-    println!("\n=== Test 1: FEN Parsing - Starting Position ===");
+    // Start from the initial position
     let starting_fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
-    match Board::from_fen(starting_fen) {
-        Ok(board) => {
-            println!("Successfully parsed starting position FEN");
-            println!("All pieces bitboard:");
-            println!("{}", board.all_pieces());
+    let mut board = Board::from_fen(starting_fen).expect("Failed to parse starting FEN");
 
-            // Check some key squares
-            let e2 = Square::from_coords(4, 1);
-            let e7 = Square::from_coords(4, 6);
-            println!("Piece at e2: {:?}", board.peice_at(e2));
-            println!("Piece at e7: {:?}", board.peice_at(e7));
-        }
-        Err(e) => println!("Failed to parse FEN: {:?}", e),
-    }
+    println!("Starting new game. You are White, engine is Black.");
+    println!("Enter moves in algebraic notation (e.g., 'e2e4' or 'e7e8q' for promotion)");
+    println!("Type 'quit' to exit, 'fen' to see current FEN, 'moves' to see legal moves\n");
 
-    // Test 2: Custom position with knights
-    println!("\n=== Test 2: FEN Parsing - Custom Position ===");
-    let custom_fen = "rnbqkb1r/pppppppp/5n2/8/8/5N2/PPPPPPPP/RNBQKB1R w KQkq - 0 1";
-    match Board::from_fen(custom_fen) {
-        Ok(board) => {
-            println!("Successfully parsed custom position");
-            let f3 = Square::from_coords(5, 2);
-            let f6 = Square::from_coords(5, 5);
-            println!("Piece at f3: {:?}", board.peice_at(f3));
-            println!("Piece at f6: {:?}", board.peice_at(f6));
-        }
-        Err(e) => println!("Failed to parse custom FEN: {:?}", e),
-    }
+    loop {
+        // Display the board
+        display_board(&board);
 
-    // Test 3: Move generation from starting position
-    println!("\n=== Test 3: Move Generation - Starting Position ===");
-    if let Ok(board) = Board::from_fen(starting_fen) {
-        let pseudo_legal = board.generate_pseudo_legal_moves();
+        // Check for checkmate or stalemate
         let legal_moves = board.generate_legal_moves();
-
-        println!("Pseudo-legal moves: {}", pseudo_legal.len());
-        println!("Legal moves: {}", legal_moves.len());
-
-        // Count moves by piece type
-        let pawn_moves = legal_moves.iter().filter(|m| m.piece.piece_type == PieceType::Pawn).count();
-        let knight_moves = legal_moves.iter().filter(|m| m.piece.piece_type == PieceType::Knight).count();
-
-        println!("Pawn moves: {}", pawn_moves);
-        println!("Knight moves: {}", knight_moves);
-
-        // Show first few moves
-        println!("\nFirst 10 legal moves:");
-        for (i, mv) in legal_moves.iter().take(10).enumerate() {
-            println!("  {}. {:?} {} -> {}",
-                i + 1,
-                mv.piece.piece_type,
-                square_to_algebraic(mv.from),
-                square_to_algebraic(mv.to)
-            );
+        if legal_moves.is_empty() {
+            if is_in_check(&board) {
+                println!("\nCheckmate! {} wins!",
+                    if board.side_to_move() == Color::White { "Black" } else { "White" });
+            } else {
+                println!("\nStalemate! Draw.");
+            }
+            break;
         }
-    }
 
-    // Test 4: Knight moves from center
-    println!("\n=== Test 4: Knight Move Generation ===");
-    let knight_fen = "4k3/8/8/3N4/8/8/8/4K3 w - - 0 1";
-    if let Ok(board) = Board::from_fen(knight_fen) {
-        let moves = board.generate_legal_moves();
-        println!("Knight on d5 can move to {} squares", moves.len());
-        println!("Knight moves:");
-        for mv in moves.iter() {
-            println!("  {} -> {}", square_to_algebraic(mv.from), square_to_algebraic(mv.to));
-        }
-    }
+        // Check whose turn it is
+        if board.side_to_move() == Color::White {
+            // Player's turn
+            println!("\nYour move (White): ");
 
-    // Test 5: Bishop sliding moves
-    println!("\n=== Test 5: Bishop Move Generation ===");
-    let bishop_fen = "4k3/8/8/3B4/8/8/8/4K3 w - - 0 1";
-    if let Ok(board) = Board::from_fen(bishop_fen) {
-        let moves = board.generate_legal_moves();
-        println!("Bishop on d5 can move to {} squares", moves.len());
-        println!("First 10 bishop moves:");
-        for (i, mv) in moves.iter().take(10).enumerate() {
-            println!("  {}. {} -> {}", i + 1, square_to_algebraic(mv.from), square_to_algebraic(mv.to));
-        }
-    }
+            let user_move = loop {
+                print!("> ");
+                io::stdout().flush().unwrap();
 
-    // Test 6: Rook sliding moves
-    println!("\n=== Test 6: Rook Move Generation ===");
-    let rook_fen = "4k3/8/8/3R4/8/8/8/4K3 w - - 0 1";
-    if let Ok(board) = Board::from_fen(rook_fen) {
-        let moves = board.generate_legal_moves();
-        println!("Rook on d5 can move to {} squares", moves.len());
-    }
+                let mut input = String::new();
+                io::stdin().read_line(&mut input).unwrap();
+                let input = input.trim().to_lowercase();
 
-    // Test 7: Queen moves
-    println!("\n=== Test 7: Queen Move Generation ===");
-    let queen_fen = "4k3/8/8/3Q4/8/8/8/4K3 w - - 0 1";
-    if let Ok(board) = Board::from_fen(queen_fen) {
-        let moves = board.generate_legal_moves();
-        println!("Queen on d5 can move to {} squares", moves.len());
-    }
+                if input == "quit" {
+                    println!("Thanks for playing!");
+                    return;
+                }
 
-    // Test 8: Pawn moves and double push
-    println!("\n=== Test 8: Pawn Move Generation ===");
-    let pawn_fen = "4k3/8/8/8/8/8/4P3/4K3 w - - 0 1";
-    if let Ok(board) = Board::from_fen(pawn_fen) {
-        let moves = board.generate_legal_moves();
-        println!("White pawn on e2 can make {} moves", moves.len());
-        for mv in moves.iter() {
-            let move_desc = match mv.move_type {
-                MoveType::Normal => {
-                    if mv.to.rank() as i8 - mv.from.rank() as i8 == 2 {
-                        "double push"
-                    } else {
-                        "single push"
+                if input == "fen" {
+                    println!("Current position hash: {:#x}", board.position_hash());
+                    continue;
+                }
+
+                if input == "moves" {
+                    println!("\nLegal moves ({}):", legal_moves.len());
+                    for (i, mv) in legal_moves.iter().enumerate() {
+                        print!("{}  ", move_to_string(mv));
+                        if (i + 1) % 8 == 0 {
+                            println!();
+                        }
+                    }
+                    println!();
+                    continue;
+                }
+
+                // Try to parse the move
+                match parse_move(&input, &legal_moves) {
+                    Some(mv) => break mv,
+                    None => {
+                        println!("Invalid move! Try again (e.g., 'e2e4' or type 'moves' to see legal moves)");
+                        continue;
                     }
                 }
-                _ => "other",
             };
-            println!("  {} -> {} ({})", square_to_algebraic(mv.from), square_to_algebraic(mv.to), move_desc);
-        }
-    }
 
-    // Test 9: Pawn captures
-    println!("\n=== Test 9: Pawn Capture Generation ===");
-    let pawn_capture_fen = "4k3/8/8/3p1p2/4P3/8/8/4K3 w - - 0 1";
-    if let Ok(board) = Board::from_fen(pawn_capture_fen) {
-        let moves = board.generate_legal_moves();
-        println!("White pawn on e4 with black pawns on d5 and f5:");
-        for mv in moves.iter() {
-            let move_type = match mv.move_type {
-                MoveType::Capture => "capture",
-                MoveType::Normal => "push",
-                _ => "other",
-            };
-            println!("  {} -> {} ({})", square_to_algebraic(mv.from), square_to_algebraic(mv.to), move_type);
-        }
-    }
+            // Make the player's move
+            board.make_move(user_move);
+            println!("You played: {}", move_to_string(&user_move));
 
-    // Test 10: Castling rights
-    println!("\n=== Test 10: Castling ===");
-    let castling_fen = "r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1";
-    if let Ok(board) = Board::from_fen(castling_fen) {
-        let moves = board.generate_legal_moves();
-        let castling_moves: Vec<_> = moves.iter()
-            .filter(|m| m.move_type == MoveType::Castle)
-            .collect();
-        println!("Available castling moves: {}", castling_moves.len());
-        for mv in castling_moves {
-            println!("  {} -> {}", square_to_algebraic(mv.from), square_to_algebraic(mv.to));
-        }
-    }
+        } else {
+            // Engine's turn (random move)
+            println!("\nEngine is thinking...");
 
-    // Test 11: Promotion
-    println!("\n=== Test 11: Pawn Promotion ===");
-    let promotion_fen = "4k3/4P3/8/8/8/8/8/4K3 w - - 0 1";
-    if let Ok(board) = Board::from_fen(promotion_fen) {
-        let moves = board.generate_legal_moves();
-        println!("White pawn on e7 (ready to promote): {} moves", moves.len());
-        for mv in moves.iter() {
-            if let MoveType::Promotion(piece_type) = mv.move_type {
-                println!("  {} -> {} promotes to {:?}",
-                    square_to_algebraic(mv.from),
-                    square_to_algebraic(mv.to),
-                    piece_type
-                );
+            use rand::prelude::IndexedRandom;
+            let mut rng = rand::rng();
+
+            if let Some(engine_move) = legal_moves.choose(&mut rng) {
+                board.make_move(*engine_move);
+                println!("Engine played: {}", move_to_string(engine_move));
             }
         }
+
+        println!();
     }
+}
 
-    // Test 12: En passant
-    println!("\n=== Test 12: En Passant ===");
-    let en_passant_fen = "4k3/8/8/3Pp3/8/8/8/4K3 w - e6 0 1";
-    if let Ok(board) = Board::from_fen(en_passant_fen) {
-        let moves = board.generate_legal_moves();
-        let ep_moves: Vec<_> = moves.iter()
-            .filter(|m| m.move_type == MoveType::EnPassant)
-            .collect();
-        println!("En passant captures available: {}", ep_moves.len());
-        for mv in ep_moves {
-            println!("  {} -> {} (en passant)", square_to_algebraic(mv.from), square_to_algebraic(mv.to));
-        }
-    }
+fn display_board(board: &Board) {
+    println!("\n  +---+---+---+---+---+---+---+---+");
 
-    // Test 13: Complex position (Italian Game)
-    println!("\n=== Test 13: Complex Position - Italian Game ===");
-    let italian_fen = "r1bqkbnr/pppp1ppp/2n5/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R b KQkq - 0 1";
-    if let Ok(board) = Board::from_fen(italian_fen) {
-        let moves = board.generate_legal_moves();
-        println!("Legal moves in Italian Game position: {}", moves.len());
+    for rank in (0..8).rev() {
+        print!("{} |", rank + 1);
 
-        // Group by piece type
-        for piece_type in [PieceType::Pawn, PieceType::Knight, PieceType::Bishop,
-                          PieceType::Rook, PieceType::Queen, PieceType::King] {
-            let count = moves.iter()
-                .filter(|m| m.piece.piece_type == piece_type)
-                .count();
-            if count > 0 {
-                println!("  {:?} moves: {}", piece_type, count);
-            }
-        }
-    }
-
-    // Test 14: Performance test
-    println!("\n=== Test 14: Performance Test ===");
-    if let Ok(board) = Board::from_fen(starting_fen) {
-        let start = std::time::Instant::now();
-        let iterations = 1000;
-
-        for _ in 0..iterations {
-            let _ = board.generate_legal_moves();
+        for file in 0..8 {
+            let square = Square::from_coords(file, rank);
+            let piece_char = match board.peice_at(square) {
+                Some(piece) => piece_to_char(piece),
+                None => ' ',
+            };
+            print!(" {} |", piece_char);
         }
 
-        let duration = start.elapsed();
-        println!("Generated legal moves {} times in {:?}", iterations, duration);
-        println!("Average time per generation: {:?}", duration / iterations);
+        println!("\n  +---+---+---+---+---+---+---+---+");
     }
 
-    println!("\n=== Board Tests Completed ===");
+    println!("    a   b   c   d   e   f   g   h");
+}
+
+fn piece_to_char(piece: lemonate::Piece) -> char {
+    let base = match piece.piece_type {
+        PieceType::Pawn => 'p',
+        PieceType::Knight => 'n',
+        PieceType::Bishop => 'b',
+        PieceType::Rook => 'r',
+        PieceType::Queen => 'q',
+        PieceType::King => 'k',
+    };
+
+    if piece.color == Color::White {
+        base.to_uppercase().next().unwrap()
+    } else {
+        base
+    }
 }
 
 fn square_to_algebraic(square: Square) -> String {
     let file = (b'a' + square.file()) as char;
     let rank = (b'1' + square.rank()) as char;
     format!("{}{}", file, rank)
+}
+
+fn move_to_string(mv: &Move) -> String {
+    let from = square_to_algebraic(mv.from);
+    let to = square_to_algebraic(mv.to);
+
+    match mv.move_type {
+        MoveType::Promotion(piece_type) => {
+            let promo = match piece_type {
+                PieceType::Queen => 'q',
+                PieceType::Rook => 'r',
+                PieceType::Bishop => 'b',
+                PieceType::Knight => 'n',
+                _ => '?',
+            };
+            format!("{}{}{}", from, to, promo)
+        }
+        MoveType::Castle => {
+            if to.starts_with('g') {
+                "O-O".to_string()
+            } else {
+                "O-O-O".to_string()
+            }
+        }
+        _ => format!("{}{}", from, to),
+    }
+}
+
+fn parse_move(input: &str, legal_moves: &[Move]) -> Option<Move> {
+    // Handle castling notation
+    if input == "o-o" || input == "0-0" {
+        return legal_moves.iter()
+            .find(|m| m.move_type == MoveType::Castle && m.to.file() == 6)
+            .copied();
+    }
+
+    if input == "o-o-o" || input == "0-0-0" {
+        return legal_moves.iter()
+            .find(|m| m.move_type == MoveType::Castle && m.to.file() == 2)
+            .copied();
+    }
+
+    // Parse algebraic notation (e.g., "e2e4" or "e7e8q")
+    if input.len() < 4 {
+        return None;
+    }
+
+    let from_file = (input.chars().nth(0)? as u8).checked_sub(b'a')?;
+    let from_rank = (input.chars().nth(1)? as u8).checked_sub(b'1')?;
+    let to_file = (input.chars().nth(2)? as u8).checked_sub(b'a')?;
+    let to_rank = (input.chars().nth(3)? as u8).checked_sub(b'1')?;
+
+    if from_file > 7 || from_rank > 7 || to_file > 7 || to_rank > 7 {
+        return None;
+    }
+
+    let from = Square::from_coords(from_file, from_rank);
+    let to = Square::from_coords(to_file, to_rank);
+
+    // Check for promotion
+    let promotion = if input.len() >= 5 {
+        match input.chars().nth(4)? {
+            'q' => Some(PieceType::Queen),
+            'r' => Some(PieceType::Rook),
+            'b' => Some(PieceType::Bishop),
+            'n' => Some(PieceType::Knight),
+            _ => None,
+        }
+    } else {
+        None
+    };
+
+    // Find matching legal move
+    legal_moves.iter()
+        .find(|m| {
+            m.from == from && m.to == to &&
+            match (&m.move_type, promotion) {
+                (MoveType::Promotion(p1), Some(p2)) => p1 == &p2,
+                (MoveType::Promotion(_), None) => false,
+                (_, Some(_)) => false,
+                _ => true,
+            }
+        })
+        .copied()
+}
+
+fn is_in_check(board: &Board) -> bool {
+    let color = board.side_to_move();
+    let king_bb = board.piece_bitboard(color, PieceType::King);
+
+    if king_bb.is_empty() {
+        return false;
+    }
+
+    let king_square = king_bb.into_iter().next().unwrap();
+    board.is_square_attacked(king_square, color.opposite())
 }
