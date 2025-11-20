@@ -1,3 +1,5 @@
+use std::hint::unreachable_unchecked;
+
 use crate::{AttackTable, Board, Color, Piece, PieceType, Square};
 use once_cell::sync::Lazy;
 
@@ -87,6 +89,18 @@ impl Board {
                 move_type: MoveType::Normal,
                 piece,
                 captured: None,
+            });
+        }
+
+        let capture_targets = attacks & enemy;
+        for to in capture_targets {
+            let captured = unsafe { self.mailbox.get_unchecked(to.index()) };
+            moves.push(Move {
+                from,
+                to,
+                move_type: MoveType::Capture,
+                piece,
+                captured: *captured,
             });
         }
     }
