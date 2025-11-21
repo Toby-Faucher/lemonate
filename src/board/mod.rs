@@ -16,6 +16,7 @@ mod fen;
 mod moves;
 pub use moves::{Move, MoveType};
 
+#[repr(align(64))]
 #[derive(Clone, Debug)]
 pub struct Board {
     piece_bitboards: [[Bitboard; 6]; 2],
