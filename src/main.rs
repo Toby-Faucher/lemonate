@@ -103,7 +103,7 @@ fn display_board(board: &Board) {
 
         for file in 0..8 {
             let square = Square::from_coords(file, rank);
-            let piece_char = match board.peice_at(square) {
+            let piece_char = match board.piece_at(square) {
                 Some(piece) => piece_to_char(piece),
                 None => ' ',
             };

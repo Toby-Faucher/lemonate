@@ -16,6 +16,7 @@ mod fen;
 mod moves;
 pub use moves::{Move, MoveType};
 
+#[repr(align(64))]
 #[derive(Clone, Debug)]
 pub struct Board {
     piece_bitboards: [[Bitboard; 6]; 2],
@@ -32,6 +33,8 @@ pub struct Board {
 
     // Move history for make/unmake operations
     move_history: Option<Vec<(Move, BoardState)>>,
+
+    mailbox: [Option<Piece>; 64],
 }
 
 impl Board {
@@ -47,31 +50,13 @@ impl Board {
             fullmove_number: 1,
             position_hash: 0,
             move_history: None,
+            mailbox: [None; 64],
         }
     }
 
-    pub fn peice_at(&self, square: Square) -> Option<Piece> {
-        if !self.all_pieces.is_set(square) {
-            return None;
-        }
-
-        for color in [Color::White, Color::Black] {
-            if self.color_bitboard[color as usize].is_set(square) {
-                for piece_type in [
-                    PieceType::Pawn,
-                    PieceType::Knight,
-                    PieceType::Bishop,
-                    PieceType::Rook,
-                    PieceType::Queen,
-                    PieceType::King,
-                ] {
-                    if self.piece_bitboards[color as usize][piece_type as usize].is_set(square) {
-                        return Some(Piece { piece_type, color });
-                    }
-                }
-            }
-        }
-        None
+    #[inline(always)]
+    pub fn piece_at(&self, square: Square) -> Option<Piece> {
+        unsafe { *self.mailbox.get_unchecked(square.index()) }
     }
 
     pub fn place_piece(&mut self, square: Square, piece: Piece) {
@@ -80,6 +65,8 @@ impl Board {
         self.color_bitboard[piece.color as usize].set(square);
 
         self.all_pieces.set(square);
+
+        self.mailbox[square.index()] = Some(piece);
 
         self.position_hash ^= zobrist_piece_hash(square, piece);
     }

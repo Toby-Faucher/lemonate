@@ -1,3 +1,15 @@
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+overflow-checks = false
+debug-assertions = false
+
+[profile.bench]
+inherits = "release"
+
 [package]
 name = "lemonate"
 version = "0.1.0"

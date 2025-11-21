@@ -1,3 +1,5 @@
+use std::hint::unreachable_unchecked;
+
 use crate::{AttackTable, Board, Color, Piece, PieceType, Square};
 use once_cell::sync::Lazy;
 
@@ -24,7 +26,7 @@ pub enum MoveType {
 
 impl Board {
     pub fn generate_legal_moves(&self) -> Vec<Move> {
-        let mut legal_moves = Vec::new();
+        let mut legal_moves = Vec::with_capacity(218); // 218 is the max amount of moves
 
         let pseudo_legal = self.generate_pseudo_legal_moves();
 
@@ -37,8 +39,7 @@ impl Board {
     }
 
     pub fn generate_pseudo_legal_moves(&self) -> Vec<Move> {
-        let mut moves = Vec::new();
-
+        let mut moves = Vec::with_capacity(256);
         let color = self.side_to_move;
         let color_idx = color as usize;
 
@@ -73,28 +74,32 @@ impl Board {
             color,
         };
 
-        // Get all knight attacks from the attack table
         let attacks = ATTACK_TABLE.knight_attacks(from);
 
-        // Filter out squares with friendly pieces
         let friendly = self.color_bitboard[color as usize];
-        let valid_targets = attacks & !friendly;
+        let enemy = self.color_bitboard[color.opposite() as usize];
 
-        // Generate moves for each valid target
-        for to in valid_targets {
-            let captured = self.peice_at(to);
-            let move_type = if captured.is_some() {
-                MoveType::Capture
-            } else {
-                MoveType::Normal
-            };
+        let quiet_targets = attacks & !friendly & !enemy;
 
+        for to in quiet_targets {
             moves.push(Move {
                 from,
                 to,
-                move_type,
+                move_type: MoveType::Normal,
                 piece,
-                captured,
+                captured: None,
+            });
+        }
+
+        let capture_targets = attacks & enemy;
+        for to in capture_targets {
+            let captured = unsafe { self.mailbox.get_unchecked(to.index()) };
+            moves.push(Move {
+                from,
+                to,
+                move_type: MoveType::Capture,
+                piece,
+                captured: *captured,
             });
         }
     }
@@ -115,7 +120,7 @@ impl Board {
 
         // Generate moves for each valid target
         for to in valid_targets {
-            let captured = self.peice_at(to);
+            let captured = self.piece_at(to);
             let move_type = if captured.is_some() {
                 MoveType::Capture
             } else {
@@ -148,7 +153,7 @@ impl Board {
 
         // Generate moves for each valid target
         for to in valid_targets {
-            let captured = self.peice_at(to);
+            let captured = self.piece_at(to);
             let move_type = if captured.is_some() {
                 MoveType::Capture
             } else {
@@ -181,7 +186,7 @@ impl Board {
 
         // Generate moves for each valid target
         for to in valid_targets {
-            let captured = self.peice_at(to);
+            let captured = self.piece_at(to);
             let move_type = if captured.is_some() {
                 MoveType::Capture
             } else {
@@ -214,7 +219,7 @@ impl Board {
 
         // Generate normal king moves
         for to in valid_targets {
-            let captured = self.peice_at(to);
+            let captured = self.piece_at(to);
             let move_type = if captured.is_some() {
                 MoveType::Capture
             } else {
@@ -366,7 +371,7 @@ impl Board {
         let capture_targets = attacks & enemy;
 
         for to in capture_targets {
-            let captured = self.peice_at(to);
+            let captured = self.piece_at(to);
 
             // Check if this is a promotion capture
             if to.rank() == promotion_rank {
@@ -540,6 +545,7 @@ impl Board {
         self.piece_bitboards[color as usize][piece_type as usize].clear(mv.from);
         self.color_bitboard[color as usize].clear(mv.from);
         self.all_pieces.clear(mv.from);
+        self.mailbox[mv.from.index()] = None;
 
         // Handle captures
         if let Some(captured) = mv.captured {
@@ -557,6 +563,7 @@ impl Board {
                 .clear(capture_square);
             self.color_bitboard[captured.color as usize].clear(capture_square);
             self.all_pieces.clear(capture_square);
+            self.mailbox[capture_square.index()] = None;
         }
 
         // Place piece on destination square
@@ -568,6 +575,10 @@ impl Board {
         self.piece_bitboards[color as usize][final_piece_type as usize].set(mv.to);
         self.color_bitboard[color as usize].set(mv.to);
         self.all_pieces.set(mv.to);
+        self.mailbox[mv.to.index()] = Some(Piece {
+            piece_type: final_piece_type,
+            color,
+        });
 
         // Handle castling - move the rook
         if mv.move_type == MoveType::Castle {
@@ -595,10 +606,15 @@ impl Board {
             self.piece_bitboards[color as usize][PieceType::Rook as usize].clear(rook_from);
             self.color_bitboard[color as usize].clear(rook_from);
             self.all_pieces.clear(rook_from);
+            self.mailbox[rook_from.index()] = None;
 
             self.piece_bitboards[color as usize][PieceType::Rook as usize].set(rook_to);
             self.color_bitboard[color as usize].set(rook_to);
             self.all_pieces.set(rook_to);
+            self.mailbox[rook_to.index()] = Some(Piece {
+                piece_type: PieceType::Rook,
+                color,
+            });
         }
     }
 }

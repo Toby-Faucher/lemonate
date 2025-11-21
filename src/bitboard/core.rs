@@ -7,47 +7,68 @@ impl Bitboard {
     pub const EMPTY: Self = Self(0);
     pub const FULL: Self = Self(u64::MAX);
 
-    // Set ops
+    #[inline(always)]
     pub fn is_set(self, square: Square) -> bool {
         let bitmask = 1u64 << square.index();
         // Any non-zero u64 is truthly
         self.0 & bitmask != 0
     }
 
+    #[inline(always)]
     pub fn set(&mut self, square: Square) {
         let bitmask = 1u64 << square.index();
         self.0 |= bitmask
     }
 
+    #[inline(always)]
     pub fn clear(&mut self, square: Square) {
         let bitmask = 1u64 << square.index();
         self.0 &= !bitmask
     }
 
+    #[inline(always)]
     pub fn toggle(&mut self, square: Square) {
         let bitmask = 1u64 << square.index();
         self.0 ^= bitmask
     }
 
+    #[inline(always)]
     pub fn count_pieces(&self) -> u32 {
         self.0.count_ones()
     }
 
+    #[inline(always)]
     pub fn is_empty(&self) -> bool {
         self.0 == 0
     }
 
+    #[inline(always)]
     pub fn is_not_empty(&self) -> bool {
         self.0 != 0
     }
 
+    #[inline(always)]
     pub fn pop_lsb(&mut self) -> Option<Square> {
         if self.is_empty() {
             None
         } else {
-            let square_index = self.0.trailing_zeros() as usize;
-            self.0 &= self.0 - 1;
-            Some(Square::from_index(square_index))
+            #[cfg(target_feature = "bmi1")]
+            {
+                use std::arch::x86_64::_blsi_u64;
+                let lsb = unsafe { _blsi_u64(self.0) };
+
+                let square_index = self.0.trailing_zeros() as usize;
+
+                self.0 ^= lsb;
+
+                Some(Square::from_index(square_index))
+            }
+            #[cfg(not(target_feature = "bmi1"))]
+            {
+                let square_index = self.0.trailing_zeros() as usize;
+                self.0 &= self.0.wrapping_sub(1);
+                Some(Square::from_index(square_index))
+            }
         }
     }
     /// Returns the number of leading zeros.

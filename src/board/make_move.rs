@@ -4,6 +4,7 @@ use super::zobrist::{
 use super::{Board, Move, MoveType};
 use crate::types::castling::CastlingRights;
 use crate::types::{Color, Piece, PieceType, Square};
+use crate::Bitboard;
 
 /// Stores all reversible board state that needs to be saved before making a move
 #[derive(Clone, Debug)]
@@ -195,21 +196,27 @@ impl Board {
         self.piece_bitboards[piece.color as usize][piece.piece_type as usize].clear(square);
         self.color_bitboard[piece.color as usize].clear(square);
         self.all_pieces.clear(square);
+        self.mailbox[square.index()] = None;
         self.position_hash ^= zobrist_piece_hash(square, piece);
     }
 
     /// Place a piece without updating hash (used in move reversal)
+    #[inline(always)]
     fn place_piece_no_hash(&mut self, square: Square, piece: Piece) {
-        self.piece_bitboards[piece.color as usize][piece.piece_type as usize].set(square);
-        self.color_bitboard[piece.color as usize].set(square);
-        self.all_pieces.set(square);
+        let mask = Bitboard(1u64 << square.index());
+        self.piece_bitboards[piece.color as usize][piece.piece_type as usize] |= mask;
+        self.color_bitboard[piece.color as usize] |= mask;
+        self.all_pieces |= mask;
+        self.mailbox[square.index()] = Some(piece);
     }
 
     /// Remove a piece without updating hash (used in move reversal)
+    #[inline(always)]
     fn remove_piece_no_hash(&mut self, square: Square, piece: Piece) {
-        self.piece_bitboards[piece.color as usize][piece.piece_type as usize].clear(square);
-        self.color_bitboard[piece.color as usize].clear(square);
-        self.all_pieces.clear(square);
+        let mask = !(Bitboard(1u64 << square.index()));
+        self.piece_bitboards[piece.color as usize][piece.piece_type as usize] &= mask;
+        self.color_bitboard[piece.color as usize] &= mask;
+        self.all_pieces &= mask;
     }
 
     /// Get rook squares for castling move
@@ -348,8 +355,8 @@ mod tests {
 
     #[test]
     fn test_make_unmake_simple_move() {
-        let mut board = Board::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
-            .unwrap();
+        let mut board =
+            Board::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1").unwrap();
 
         let initial_hash = board.position_hash;
 
