@@ -1,5 +1,3 @@
-use std::hint::unreachable_unchecked;
-
 use crate::{AttackTable, Board, Color, Piece, PieceType, Square};
 use once_cell::sync::Lazy;
 
