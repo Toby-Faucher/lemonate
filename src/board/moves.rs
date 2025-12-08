@@ -23,6 +23,25 @@ pub enum MoveType {
 }
 
 impl Board {
+    pub fn is_game_over(&self) -> bool {
+        self.generate_legal_moves().is_empty()
+    }
+
+    pub fn is_checkmate(&self) -> bool {
+        if !self.is_game_over() {
+            return false;
+        }
+
+        let king_bb = self.piece_bitboards[self.side_to_move as usize][PieceType::King as usize];
+        let king_square = king_bb.into_iter().next().unwrap();
+
+        self.is_square_attacked(king_square, self.side_to_move.opposite())
+    }
+
+    pub fn is_stalemate(&self) -> bool {
+        self.is_game_over() && !self.is_checkmate()
+    }
+
     pub fn generate_legal_moves(&self) -> Vec<Move> {
         let mut legal_moves = Vec::with_capacity(218); // 218 is the max amount of moves
 
