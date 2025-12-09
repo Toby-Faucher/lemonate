@@ -55,6 +55,40 @@ impl Board {
         legal_moves
     }
 
+    pub fn winner(&self) -> Option<Color> {
+        if self.is_checkmate() {
+            Some(self.side_to_move.opposite()) // Op wins
+        } else {
+            None
+        }
+    }
+
+    pub fn is_draw_by_fifty_moves(&self) -> bool {
+        self.halfmove_clock >= 100
+    }
+
+    pub fn is_insufficient_material(&self) -> bool {
+        for color in [Color::White, Color::Black] {
+            if !self.piece_bitboard(color, PieceType::Pawn).is_empty()
+                || !self.piece_bitboard(color, PieceType::Rook).is_empty()
+                || !self.piece_bitboard(color, PieceType::Queen).is_empty()
+            {
+                return false;
+            }
+        }
+
+        let white_knights = self.piece_bitboard(Color::White, PieceType::Knight).count();
+        let white_bishops = self.piece_bitboard(Color::White, PieceType::Bishop).count();
+
+        let black_knights = self.piece_bitboard(Color::Black, PieceType::Knight).count();
+        let black_bishops = self.piece_bitboard(Color::Black, PieceType::Bishop).count();
+
+        let white_minors = white_knights + white_bishops;
+        let black_minors = black_knights + black_bishops;
+
+        white_minors <= 1 && black_minors <= 1
+    }
+
     pub fn generate_pseudo_legal_moves(&self) -> Vec<Move> {
         let mut moves = Vec::with_capacity(256);
         let color = self.side_to_move;
