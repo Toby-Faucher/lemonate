@@ -23,6 +23,30 @@ impl Material {
         }
     }
 
+    /// Create material values using PeSTO's middlegame values
+    pub const fn pesto_mg() -> Self {
+        Self {
+            pawn: 82,
+            knight: 337,
+            bishop: 365,
+            rook: 477,
+            queen: 1025,
+            king: 0,
+        }
+    }
+
+    /// Create material values using PeSTO's endgame values
+    pub const fn pesto_eg() -> Self {
+        Self {
+            pawn: 94,
+            knight: 281,
+            bishop: 297,
+            rook: 512,
+            queen: 936,
+            king: 0,
+        }
+    }
+
     pub fn value(&self, piece_type: PieceType) -> u16 {
         match piece_type {
             PieceType::Pawn => self.pawn,

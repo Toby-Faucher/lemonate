@@ -1,4 +1,5 @@
 use lemonate::board::{Board, Move, MoveType};
+use lemonate::eval;
 use lemonate::types::{Color, PieceType, Square};
 use std::io::{self, Write};
 
@@ -79,15 +80,28 @@ fn main() {
             println!("You played: {}", move_to_string(&user_move));
 
         } else {
-            // Engine's turn (random move)
+            // Engine's turn (evaluate moves)
             println!("\nEngine is thinking...");
 
-            use rand::prelude::IndexedRandom;
-            let mut rng = rand::rng();
+            let mut best_move = None;
+            let mut best_score = i32::MIN;
 
-            if let Some(engine_move) = legal_moves.choose(&mut rng) {
-                board.make_move(*engine_move);
-                println!("Engine played: {}", move_to_string(engine_move));
+            for mv in &legal_moves {
+                let mut board_copy = board.clone();
+                board_copy.make_move(*mv);
+
+                // Evaluate from Black's perspective (negate since eval is from White's perspective)
+                let score = -eval::evaluate(&board_copy);
+
+                if score > best_score {
+                    best_score = score;
+                    best_move = Some(*mv);
+                }
+            }
+
+            if let Some(engine_move) = best_move {
+                board.make_move(engine_move);
+                println!("Engine played: {} (eval: {})", move_to_string(&engine_move), best_score);
             }
         }
 
