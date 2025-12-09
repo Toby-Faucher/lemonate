@@ -1,5 +1,8 @@
 use crate::Board;
 
+mod material;
+pub use material::MaterialEvaluator;
+
 pub struct Evaluator {
     material: MaterialEvaluator,
     pst: PieceSquareTableEval,
