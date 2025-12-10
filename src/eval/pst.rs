@@ -6,12 +6,11 @@ use crate::types::piece::PieceType;
 use crate::types::Color;
 use crate::Board;
 
+use super::phase::GamePhase;
+
 // Material values (middlegame, endgame)
 pub const MG_VALUE: [i32; 6] = [82, 337, 365, 477, 1025, 0];
 pub const EG_VALUE: [i32; 6] = [94, 281, 297, 512, 936, 0];
-
-// Game phase increments for each piece type
-pub const GAMEPHASE_INC: [i32; 6] = [0, 1, 1, 2, 4, 0];
 
 // Middlegame piece-square tables (from White's perspective, rank 8 to rank 1)
 pub const MG_PAWN_TABLE: [i32; 64] = [
@@ -92,6 +91,7 @@ pub const EG_KING_TABLE: [i32; 64] = [
 pub struct PieceSquareTableEval {
     mg_table: [&'static [i32; 64]; 6],
     eg_table: [&'static [i32; 64]; 6],
+    phase: GamePhase,
 }
 
 impl PieceSquareTableEval {
@@ -113,33 +113,8 @@ impl PieceSquareTableEval {
                 &EG_QUEEN_TABLE,
                 &EG_KING_TABLE,
             ],
+            phase: GamePhase::new(),
         }
-    }
-
-    /// Calculate the game phase (0 = endgame, 24 = opening)
-    pub fn game_phase(&self, board: &Board) -> i32 {
-        let mut phase = 0;
-
-        for piece_type in [
-            PieceType::Pawn,
-            PieceType::Knight,
-            PieceType::Bishop,
-            PieceType::Rook,
-            PieceType::Queen,
-            PieceType::King,
-        ] {
-            let white_count = board
-                .piece_bitboard(Color::White, piece_type)
-                .count_pieces();
-            let black_count = board
-                .piece_bitboard(Color::Black, piece_type)
-                .count_pieces();
-            let total_count = white_count + black_count;
-
-            phase += GAMEPHASE_INC[piece_type as usize] * total_count as i32;
-        }
-
-        phase.min(24) // Cap at 24 to avoid distortions from early promotions
     }
 
     /// Get the PST value for a piece on a square (from White's perspective)
@@ -190,12 +165,9 @@ impl PieceSquareTableEval {
             }
         }
 
-        // Tapered evaluation
-        let phase = self.game_phase(board);
-        let mg_phase = phase;
-        let eg_phase = 24 - phase;
-
-        (mg_score * mg_phase + eg_score * eg_phase) / 24
+        // Tapered evaluation using the phase module
+        let phase = self.phase.calculate(board);
+        self.phase.taper(mg_score, eg_score, phase)
     }
 }
 

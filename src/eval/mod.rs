@@ -1,9 +1,11 @@
 use crate::Board;
 
 mod material;
+mod phase;
 mod pst;
 
 pub use material::MaterialEvaluator;
+pub use phase::GamePhase;
 pub use pst::PieceSquareTableEval;
 
 // TODO: remove this
@@ -12,6 +14,7 @@ pub struct PawnStructureEval;
 pub struct Evaluator {
     material: MaterialEvaluator,
     pst: PieceSquareTableEval,
+    phase: GamePhase,
     pawn_structure: PawnStructureEval,
     // king_safety: KingSafetyEval,  // TODO: Implement
     // mobility: MobilityEval,        // TODO: Implement
@@ -22,6 +25,7 @@ impl Evaluator {
         Self {
             material: MaterialEvaluator::new(),
             pst: PieceSquareTableEval::new(),
+            phase: GamePhase::new(),
             pawn_structure: PawnStructureEval,
         }
     }
