@@ -1,5 +1,5 @@
 use lemonate::board::{Board, Move, MoveType};
-use lemonate::eval;
+use lemonate::eval::Evaluator;
 use lemonate::types::{Color, PieceType, Square};
 use std::io::{self, Write};
 
@@ -83,25 +83,39 @@ fn main() {
             // Engine's turn (evaluate moves)
             println!("\nEngine is thinking...");
 
+            let evaluator = Evaluator::new();
             let mut best_move = None;
             let mut best_score = i32::MIN;
+            let mut best_details = None;
 
             for mv in &legal_moves {
                 let mut board_copy = board.clone();
                 board_copy.make_move(*mv);
 
                 // Evaluate from Black's perspective (negate since eval is from White's perspective)
-                let score = -eval::evaluate(&board_copy);
+                let details = evaluator.evaluate_detailed(&board_copy);
+                let score = -details.total();
 
                 if score > best_score {
                     best_score = score;
                     best_move = Some(*mv);
+                    best_details = Some(details);
                 }
             }
 
             if let Some(engine_move) = best_move {
                 board.make_move(engine_move);
-                println!("Engine played: {} (eval: {})", move_to_string(&engine_move), best_score);
+                println!("Engine played: {}", move_to_string(&engine_move));
+
+                if let Some(details) = best_details {
+                    println!("\n--- Evaluation Breakdown ---");
+                    println!("  PST score:    {:+} cp", -details.pst);
+                    println!("  Pawn struct:  {:+} cp", -details.pawn_structure);
+                    println!("  Total:        {:+} cp", best_score);
+                    println!("  Phase:        {}/256 (0=endgame, 256=opening)", details.phase);
+                }
+
+                print_material_count(&board);
             }
         }
 
@@ -247,4 +261,31 @@ fn is_in_check(board: &Board) -> bool {
 
     let king_square = king_bb.into_iter().next().unwrap();
     board.is_square_attacked(king_square, color.opposite())
+}
+
+fn print_material_count(board: &Board) {
+    let pieces = [
+        (PieceType::Queen, "Q"),
+        (PieceType::Rook, "R"),
+        (PieceType::Bishop, "B"),
+        (PieceType::Knight, "N"),
+        (PieceType::Pawn, "P"),
+    ];
+
+    print!("\n--- Material ---\n  White: ");
+    for (pt, name) in &pieces {
+        let count = board.piece_bitboard(Color::White, *pt).count_pieces();
+        if count > 0 {
+            print!("{}{} ", count, name);
+        }
+    }
+
+    print!("\n  Black: ");
+    for (pt, name) in &pieces {
+        let count = board.piece_bitboard(Color::Black, *pt).count_pieces();
+        if count > 0 {
+            print!("{}{} ", count, name);
+        }
+    }
+    println!();
 }
