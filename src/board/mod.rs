@@ -54,6 +54,10 @@ impl Board {
         }
     }
 
+    pub fn starting_position() -> Self {
+        Self::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1").unwrap()
+    }
+
     #[inline(always)]
     pub fn piece_at(&self, square: Square) -> Option<Piece> {
         unsafe { *self.mailbox.get_unchecked(square.index()) }
