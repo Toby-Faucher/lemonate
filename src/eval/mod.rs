@@ -1,5 +1,6 @@
 use crate::Board;
 
+mod king_safety;
 mod material;
 mod pawn_structure;
 mod phase;
