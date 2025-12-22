@@ -143,3 +143,41 @@ impl Default for KingSafetyEval {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_castled_king_with_shield() {
+        // White king on g1 with pawns on f2, g2, h2.
+        let board = Board::from_fen("8/8/8/8/8/8/5PPP/6K1 w - - 0 1").unwrap();
+        let eval = KingSafetyEval::new();
+        let (mg, eg) = eval.evaluate_king(&board, Color::White);
+
+        // Three close shield pawns.
+        assert_eq!(mg, 3 * PAWN_SHIELD_CLOSE_MG);
+        assert_eq!(eg, 3 * PAWN_SHIELD_CLOSE_EG);
+    }
+
+    #[test]
+    fn test_open_file_penalty() {
+        // White king on e1, no pawns on e-file.
+        let board = Board::from_fen("8/8/8/8/8/8/PPP2PPP/4K3 w - - 0 1").unwrap();
+        let eval = KingSafetyEval::new();
+        let (mg, _) = eval.evaluate_king(&board, Color::White);
+
+        // Open e-file penalty included.
+        assert!(mg < 0);
+    }
+
+    #[test]
+    fn test_symmetric_position() {
+        let board = Board::from_fen("r3k2r/ppp2ppp/8/8/8/8/PPP2PPP/R3K2R w KQkq - 0 1").unwrap();
+        let eval = KingSafetyEval::new();
+        let score = eval.evaluate(&board);
+
+        // Symmetric structure gives balanced score.
+        assert!(score.abs() < 10);
+    }
+}
