@@ -22,8 +22,14 @@ fn main() {
         let legal_moves = board.generate_legal_moves();
         if legal_moves.is_empty() {
             if is_in_check(&board) {
-                println!("\nCheckmate! {} wins!",
-                    if board.side_to_move() == Color::White { "Black" } else { "White" });
+                println!(
+                    "\nCheckmate! {} wins!",
+                    if board.side_to_move() == Color::White {
+                        "Black"
+                    } else {
+                        "White"
+                    }
+                );
             } else {
                 println!("\nStalemate! Draw.");
             }
@@ -78,7 +84,6 @@ fn main() {
             // Make the player's move
             board.make_move(user_move);
             println!("You played: {}", move_to_string(&user_move));
-
         } else {
             // Engine's turn (evaluate moves)
             println!("\nEngine is thinking...");
@@ -111,8 +116,12 @@ fn main() {
                     println!("\n--- Evaluation Breakdown ---");
                     println!("  PST score:    {:+} cp", -details.pst);
                     println!("  Pawn struct:  {:+} cp", -details.pawn_structure);
+                    println!("  King safety:  {:+} cp", -details.king_safety);
                     println!("  Total:        {:+} cp", best_score);
-                    println!("  Phase:        {}/256 (0=endgame, 256=opening)", details.phase);
+                    println!(
+                        "  Phase:        {}/256 (0=endgame, 256=opening)",
+                        details.phase
+                    );
                 }
 
                 print_material_count(&board);
@@ -196,13 +205,15 @@ fn move_to_string(mv: &Move) -> String {
 fn parse_move(input: &str, legal_moves: &[Move]) -> Option<Move> {
     // Handle castling notation
     if input == "o-o" || input == "0-0" {
-        return legal_moves.iter()
+        return legal_moves
+            .iter()
             .find(|m| m.move_type == MoveType::Castle && m.to.file() == 6)
             .copied();
     }
 
     if input == "o-o-o" || input == "0-0-0" {
-        return legal_moves.iter()
+        return legal_moves
+            .iter()
             .find(|m| m.move_type == MoveType::Castle && m.to.file() == 2)
             .copied();
     }
@@ -238,15 +249,17 @@ fn parse_move(input: &str, legal_moves: &[Move]) -> Option<Move> {
     };
 
     // Find matching legal move
-    legal_moves.iter()
+    legal_moves
+        .iter()
         .find(|m| {
-            m.from == from && m.to == to &&
-            match (&m.move_type, promotion) {
-                (MoveType::Promotion(p1), Some(p2)) => p1 == &p2,
-                (MoveType::Promotion(_), None) => false,
-                (_, Some(_)) => false,
-                _ => true,
-            }
+            m.from == from
+                && m.to == to
+                && match (&m.move_type, promotion) {
+                    (MoveType::Promotion(p1), Some(p2)) => p1 == &p2,
+                    (MoveType::Promotion(_), None) => false,
+                    (_, Some(_)) => false,
+                    _ => true,
+                }
         })
         .copied()
 }
