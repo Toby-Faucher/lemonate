@@ -90,6 +90,10 @@ impl Board {
     pub fn piece_bitboard(&self, color: Color, piece_type: PieceType) -> Bitboard {
         self.piece_bitboards[color as usize][piece_type as usize]
     }
+
+    pub fn color_bitboard(&self, color: Color) -> Bitboard {
+        self.color_bitboard[color as usize]
+    }
 }
 
 impl Default for Board {
