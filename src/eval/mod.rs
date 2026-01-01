@@ -2,12 +2,14 @@ use crate::Board;
 
 mod king_safety;
 mod material;
+mod mobility;
 mod pawn_structure;
 mod phase;
 mod pst;
 
 pub use king_safety::KingSafetyEval;
 pub use material::MaterialEvaluator;
+pub use mobility::MobilityEval;
 pub use pawn_structure::PawnStructureEval;
 pub use phase::GamePhase;
 pub use pst::PieceSquareTableEval;
@@ -18,7 +20,7 @@ pub struct Evaluator {
     phase: GamePhase,
     pawn_structure: PawnStructureEval,
     king_safety: KingSafetyEval,
-    // mobility: MobilityEval,             // TODO: Implement
+    mobility: MobilityEval,
 }
 
 impl Evaluator {
@@ -29,6 +31,7 @@ impl Evaluator {
             phase: GamePhase::new(),
             pawn_structure: PawnStructureEval::new(),
             king_safety: KingSafetyEval::new(),
+            mobility: MobilityEval::new(),
         }
     }
 
@@ -36,7 +39,8 @@ impl Evaluator {
         let pst_score = self.pst.evaluate(board);
         let pawn_score = self.pawn_structure.evaluate(board);
         let king_score = self.king_safety.evaluate(board);
-        pst_score + pawn_score + king_score
+        let mobility_score = self.mobility.evaluate(board);
+        pst_score + pawn_score + king_score + mobility_score
     }
 
     pub fn evaluate_detailed(&self, board: &Board) -> EvalDetails {
@@ -44,6 +48,7 @@ impl Evaluator {
             pst: self.pst.evaluate(board),
             pawn_structure: self.pawn_structure.evaluate(board),
             king_safety: self.king_safety.evaluate(board),
+            mobility: self.mobility.evaluate(board),
             phase: self.phase.calculate(board),
         }
     }
@@ -53,12 +58,13 @@ pub struct EvalDetails {
     pub pst: i32,
     pub pawn_structure: i32,
     pub king_safety: i32,
+    pub mobility: i32,
     pub phase: i32,
 }
 
 impl EvalDetails {
     pub fn total(&self) -> i32 {
-        self.pst + self.pawn_structure + self.king_safety
+        self.pst + self.pawn_structure + self.king_safety + self.mobility
     }
 }
 
