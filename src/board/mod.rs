@@ -94,6 +94,19 @@ impl Board {
     pub fn color_bitboard(&self, color: Color) -> Bitboard {
         self.color_bitboard[color as usize]
     }
+
+    /// Check if the side to move is in check.
+    pub fn is_in_check(&self) -> bool {
+        let color = self.side_to_move;
+        let king_bb = self.piece_bitboard(color, PieceType::King);
+
+        if king_bb.is_empty() {
+            return false;
+        }
+
+        let king_square = king_bb.into_iter().next().unwrap();
+        self.is_square_attacked(king_square, color.opposite())
+    }
 }
 
 impl Default for Board {

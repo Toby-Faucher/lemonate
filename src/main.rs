@@ -1,7 +1,11 @@
 use lemonate::board::{Board, Move, MoveType};
 use lemonate::eval::Evaluator;
+use lemonate::search::{is_mate_score, mate_in, SearchEngine, SearchLimits};
 use lemonate::types::{Color, PieceType, Square};
 use std::io::{self, Write};
+
+/// Default search depth for the engine.
+const DEFAULT_DEPTH: u8 = 6;
 
 fn main() {
     println!("=== Lemonate Chess Engine ===\n");
@@ -9,19 +13,23 @@ fn main() {
     // Start from the initial position
     let starting_fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
     let mut board = Board::from_fen(starting_fen).expect("Failed to parse starting FEN");
+    board.enable_history();
+
+    let mut engine = SearchEngine::new();
+    let mut search_depth = DEFAULT_DEPTH;
 
     println!("Starting new game. You are White, engine is Black.");
     println!("Enter moves in algebraic notation (e.g., 'e2e4' or 'e7e8q' for promotion)");
-    println!("Type 'quit' to exit, 'fen' to see current FEN, 'moves' to see legal moves\n");
+    println!("Commands: 'quit', 'fen', 'moves', 'eval', 'depth <n>', 'undo'\n");
 
-    loop {
+    'game: loop {
         // Display the board
         display_board(&board);
 
         // Check for checkmate or stalemate
         let legal_moves = board.generate_legal_moves();
         if legal_moves.is_empty() {
-            if is_in_check(&board) {
+            if board.is_in_check() {
                 println!(
                     "\nCheckmate! {} wins!",
                     if board.side_to_move() == Color::White {
@@ -34,6 +42,22 @@ fn main() {
                 println!("\nStalemate! Draw.");
             }
             break;
+        }
+
+        // Check for draws
+        if board.is_draw_by_fifty_moves() {
+            println!("\nDraw by fifty-move rule!");
+            break;
+        }
+
+        if board.is_insufficient_material() {
+            println!("\nDraw by insufficient material!");
+            break;
+        }
+
+        // Show check status
+        if board.is_in_check() {
+            println!("\n** CHECK **");
         }
 
         // Check whose turn it is
@@ -55,14 +79,14 @@ fn main() {
                 }
 
                 if input == "fen" {
-                    println!("Current position hash: {:#x}", board.position_hash());
+                    println!("Position hash: {:#x}", board.position_hash());
                     continue;
                 }
 
                 if input == "moves" {
                     println!("\nLegal moves ({}):", legal_moves.len());
                     for (i, mv) in legal_moves.iter().enumerate() {
-                        print!("{}  ", move_to_string(mv));
+                        print!("{:<7}", move_to_string(mv));
                         if (i + 1) % 8 == 0 {
                             println!();
                         }
@@ -71,11 +95,44 @@ fn main() {
                     continue;
                 }
 
+                if input == "eval" {
+                    print_evaluation(&board);
+                    continue;
+                }
+
+                if input.starts_with("depth ") {
+                    if let Ok(d) = input[6..].trim().parse::<u8>() {
+                        if d >= 1 && d <= 20 {
+                            search_depth = d;
+                            println!("Search depth set to {}", search_depth);
+                        } else {
+                            println!("Depth must be between 1 and 20");
+                        }
+                    } else {
+                        println!("Invalid depth. Usage: depth <n>");
+                    }
+                    continue;
+                }
+
+                if input == "undo" {
+                    // Undo both player and engine move
+                    if board.unmake_move() {
+                        board.unmake_move(); // Try to undo engine's move too
+                        println!("Move undone.");
+                        continue 'game; // Re-display board
+                    } else {
+                        println!("Nothing to undo.");
+                    }
+                    continue;
+                }
+
                 // Try to parse the move
                 match parse_move(&input, &legal_moves) {
                     Some(mv) => break mv,
                     None => {
-                        println!("Invalid move! Try again (e.g., 'e2e4' or type 'moves' to see legal moves)");
+                        println!(
+                            "Invalid move! Try again (e.g., 'e2e4' or type 'moves' to see legal moves)"
+                        );
                         continue;
                     }
                 }
@@ -85,46 +142,65 @@ fn main() {
             board.make_move(user_move);
             println!("You played: {}", move_to_string(&user_move));
         } else {
-            // Engine's turn (evaluate moves)
-            println!("\nEngine is thinking...");
+            // Engine's turn
+            println!("\nEngine thinking (depth {})...", search_depth);
 
-            let evaluator = Evaluator::new();
-            let mut best_move = None;
-            let mut best_score = i32::MIN;
-            let mut best_details = None;
+            let start = std::time::Instant::now();
+            let result = engine.search(&board, SearchLimits::depth(search_depth));
+            let elapsed = start.elapsed();
 
-            for mv in &legal_moves {
-                let mut board_copy = board.clone();
-                board_copy.make_move(*mv);
-
-                // Evaluate from Black's perspective (negate since eval is from White's perspective)
-                let details = evaluator.evaluate_detailed(&board_copy);
-                let score = -details.total();
-
-                if score > best_score {
-                    best_score = score;
-                    best_move = Some(*mv);
-                    best_details = Some(details);
-                }
-            }
-
-            if let Some(engine_move) = best_move {
+            if let Some(engine_move) = result.best_move {
                 board.make_move(engine_move);
+
+                // Format the score
+                let score_str = if is_mate_score(result.score) {
+                    if let Some(moves) = mate_in(result.score) {
+                        if result.score > 0 {
+                            format!("M{}", moves)
+                        } else {
+                            format!("-M{}", moves)
+                        }
+                    } else {
+                        format!("{:+}", result.score)
+                    }
+                } else {
+                    format!("{:+.2}", result.score as f64 / 100.0)
+                };
+
                 println!("Engine played: {}", move_to_string(&engine_move));
 
-                if let Some(details) = best_details {
-                    println!("\n--- Evaluation Breakdown ---");
-                    println!("  PST score:    {:+} cp", -details.pst);
-                    println!("  Pawn struct:  {:+} cp", -details.pawn_structure);
-                    println!("  King safety:  {:+} cp", -details.king_safety);
-                    println!("  Total:        {:+} cp", best_score);
-                    println!(
-                        "  Phase:        {}/256 (0=endgame, 256=opening)",
-                        details.phase
-                    );
+                // Show search info
+                println!("\n--- Search Info ---");
+                println!("  Score:      {} pawns", score_str);
+                println!("  Depth:      {}/{}", result.depth, result.stats.seldepth);
+                println!("  Nodes:      {}", format_nodes(result.stats.nodes));
+                println!(
+                    "  Time:       {:.2}s",
+                    elapsed.as_secs_f64()
+                );
+                println!(
+                    "  NPS:        {}",
+                    format_nodes(result.stats.nps(elapsed.as_millis()))
+                );
+
+                // Show principal variation
+                if !result.pv.is_empty() {
+                    print!("  PV:         ");
+                    for (i, mv) in result.pv.iter().take(6).enumerate() {
+                        if i > 0 {
+                            print!(" ");
+                        }
+                        print!("{}", move_to_string(mv));
+                    }
+                    if result.pv.len() > 6 {
+                        print!(" ...");
+                    }
+                    println!();
                 }
 
                 print_material_count(&board);
+            } else {
+                println!("Engine has no legal moves!");
             }
         }
 
@@ -264,16 +340,30 @@ fn parse_move(input: &str, legal_moves: &[Move]) -> Option<Move> {
         .copied()
 }
 
-fn is_in_check(board: &Board) -> bool {
-    let color = board.side_to_move();
-    let king_bb = board.piece_bitboard(color, PieceType::King);
+fn print_evaluation(board: &Board) {
+    let evaluator = Evaluator::new();
+    let details = evaluator.evaluate_detailed(board);
 
-    if king_bb.is_empty() {
-        return false;
-    }
-
-    let king_square = king_bb.into_iter().next().unwrap();
-    board.is_square_attacked(king_square, color.opposite())
+    println!("\n--- Position Evaluation ---");
+    println!("  PST:          {:+.2} pawns", details.pst as f64 / 100.0);
+    println!(
+        "  Pawn struct:  {:+.2} pawns",
+        details.pawn_structure as f64 / 100.0
+    );
+    println!(
+        "  King safety:  {:+.2} pawns",
+        details.king_safety as f64 / 100.0
+    );
+    println!(
+        "  Mobility:     {:+.2} pawns",
+        details.mobility as f64 / 100.0
+    );
+    println!("  -------------------------");
+    println!("  Total:        {:+.2} pawns", details.total() as f64 / 100.0);
+    println!(
+        "  Phase:        {}/24 (0=endgame, 24=opening)",
+        details.phase
+    );
 }
 
 fn print_material_count(board: &Board) {
@@ -301,4 +391,14 @@ fn print_material_count(board: &Board) {
         }
     }
     println!();
+}
+
+fn format_nodes(nodes: u64) -> String {
+    if nodes >= 1_000_000 {
+        format!("{:.2}M", nodes as f64 / 1_000_000.0)
+    } else if nodes >= 1_000 {
+        format!("{:.1}K", nodes as f64 / 1_000.0)
+    } else {
+        format!("{}", nodes)
+    }
 }
