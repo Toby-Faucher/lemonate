@@ -217,6 +217,7 @@ impl Board {
         self.piece_bitboards[piece.color as usize][piece.piece_type as usize] &= mask;
         self.color_bitboard[piece.color as usize] &= mask;
         self.all_pieces &= mask;
+        self.mailbox[square.index()] = None;
     }
 
     /// Get rook squares for castling move
@@ -346,6 +347,45 @@ impl Board {
             bits |= 1 << 3;
         }
         zobrist_castling_hash(bits)
+    }
+
+    /// Enable move history tracking for make/unmake operations.
+    pub fn enable_history(&mut self) {
+        if self.move_history.is_none() {
+            self.move_history = Some(Vec::new());
+        }
+    }
+
+    /// Make a null move (pass the turn without moving).
+    ///
+    /// Used for null move pruning in the search. Saves minimal state
+    /// needed to restore the position.
+    ///
+    /// # Important
+    /// This is NOT a legal chess move - only use for search purposes.
+    pub fn make_null_move(&mut self) {
+        // XOR out old en passant from hash
+        if let Some(old_ep) = self.en_passant_square {
+            self.position_hash ^= zobrist_en_passant_hash(Some(old_ep.file()));
+        }
+
+        // Clear en passant
+        self.en_passant_square = None;
+
+        // Switch side to move
+        self.side_to_move = self.side_to_move.opposite();
+        self.position_hash ^= zobrist_side_to_move_hash();
+    }
+
+    /// Unmake a null move (restore the position after a null move).
+    ///
+    /// Note: This does NOT restore the en passant square - the caller
+    /// is responsible for tracking this if needed. For search purposes,
+    /// the en passant square is typically not critical after a null move.
+    pub fn unmake_null_move(&mut self) {
+        // Switch side back
+        self.side_to_move = self.side_to_move.opposite();
+        self.position_hash ^= zobrist_side_to_move_hash();
     }
 }
 
