@@ -364,6 +364,9 @@ impl Board {
     /// # Important
     /// This is NOT a legal chess move - only use for search purposes.
     pub fn make_null_move(&mut self) {
+        // Save en passant square for restoration
+        self.null_move_saved_ep = self.en_passant_square;
+
         // XOR out old en passant from hash
         if let Some(old_ep) = self.en_passant_square {
             self.position_hash ^= zobrist_en_passant_hash(Some(old_ep.file()));
@@ -379,13 +382,19 @@ impl Board {
 
     /// Unmake a null move (restore the position after a null move).
     ///
-    /// Note: This does NOT restore the en passant square - the caller
-    /// is responsible for tracking this if needed. For search purposes,
-    /// the en passant square is typically not critical after a null move.
+    /// Restores the en passant square and position hash to their
+    /// pre-null-move state.
     pub fn unmake_null_move(&mut self) {
         // Switch side back
         self.side_to_move = self.side_to_move.opposite();
         self.position_hash ^= zobrist_side_to_move_hash();
+
+        // Restore en passant square and update hash
+        if let Some(saved_ep) = self.null_move_saved_ep {
+            self.en_passant_square = Some(saved_ep);
+            self.position_hash ^= zobrist_en_passant_hash(Some(saved_ep.file()));
+        }
+        self.null_move_saved_ep = None;
     }
 }
 
