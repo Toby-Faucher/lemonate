@@ -332,7 +332,8 @@ impl SearchEngine {
             }
 
             // Fallback to full window if delta gets too large.
-            if delta > 500 {
+            // Lower threshold (200 instead of 500) to reduce aspiration bugs.
+            if delta > 200 {
                 alpha = -INFINITY;
                 beta = INFINITY;
             }
@@ -396,10 +397,11 @@ impl SearchEngine {
             hash_move = entry.best_move;
 
             // Use TT score for cutoffs (not at root, not PV nodes).
-            if !is_root && entry.depth >= depth as u8 {
+            if !is_root && !is_pv && entry.depth >= depth as u8 {
                 if let Some(score) = entry.get_score(alpha, beta) {
                     self.stats.tt_cutoffs += 1;
-                    return score;
+                    // Adjust mate scores for current ply distance.
+                    return TranspositionTable::adjust_score_for_retrieval(score, ply);
                 }
             }
         }
@@ -540,10 +542,12 @@ impl SearchEngine {
                             self.update_cutoff_heuristics(board, &mv, depth, ply, &quiets_tried);
                         }
 
-                        // Store in TT.
+                        // Store in TT with adjusted mate score.
+                        let stored_score =
+                            TranspositionTable::adjust_score_for_storage(score, ply);
                         self.tt.store(
                             hash,
-                            score,
+                            stored_score,
                             depth as u8,
                             EntryType::LowerBound,
                             Some(mv),
@@ -555,14 +559,15 @@ impl SearchEngine {
             }
         }
 
-        // Store result in transposition table.
+        // Store result in transposition table with adjusted mate score.
         let entry_type = if best_score <= original_alpha {
             EntryType::UpperBound
         } else {
             EntryType::Exact
         };
 
-        self.tt.store(hash, best_score, depth as u8, entry_type, best_move);
+        let stored_score = TranspositionTable::adjust_score_for_storage(best_score, ply);
+        self.tt.store(hash, stored_score, depth as u8, entry_type, best_move);
 
         best_score
     }
@@ -1008,4 +1013,84 @@ mod tests {
         assert_eq!(mate_in(MATE_SCORE - 4), Some(2));
         assert_eq!(mate_in(100), None);
     }
+
+    #[test]
+    fn test_no_queen_blunder() {
+        // Simulate the interactive game scenario:
+        // 1. Start from initial position
+        // 2. User plays e4
+        // 3. Engine searches and plays e6
+        // 4. User plays d4
+        // 5. Engine searches and plays... should NOT be Qg5!
+
+        let mut board = Board::starting_position();
+        board.enable_history();
+
+        let mut engine = SearchEngine::new();
+
+        // User plays e4
+        let e4 = board
+            .generate_legal_moves()
+            .into_iter()
+            .find(|m| {
+                m.from.file() == 4 && m.from.rank() == 1 && m.to.file() == 4 && m.to.rank() == 3
+            })
+            .unwrap();
+        board.make_move(e4);
+
+        // Engine searches for response to e4 (this populates TT)
+        let _e6_result = engine.search(&board, SearchLimits::depth(6));
+        // Assume engine plays e6
+        let e6 = board
+            .generate_legal_moves()
+            .into_iter()
+            .find(|m| {
+                m.from.file() == 4 && m.from.rank() == 6 && m.to.file() == 4 && m.to.rank() == 5
+            })
+            .unwrap();
+        board.make_move(e6);
+
+        // User plays d4
+        let d4 = board
+            .generate_legal_moves()
+            .into_iter()
+            .find(|m| {
+                m.from.file() == 3 && m.from.rank() == 1 && m.to.file() == 3 && m.to.rank() == 3
+            })
+            .unwrap();
+        board.make_move(d4);
+
+        // Engine searches for response to d4 - this is where the bug occurs
+        let result = engine.search(&board, SearchLimits::depth(10));
+
+        let best_move = result.best_move.expect("Should find a move");
+
+        // Check that the engine does NOT play d8g5 (Qg5)
+        let from_sq = best_move.from;
+        let to_sq = best_move.to;
+        let is_queen_blunder = from_sq.file() == 3
+            && from_sq.rank() == 7 // d8
+            && to_sq.file() == 6
+            && to_sq.rank() == 4; // g5
+
+        assert!(
+            !is_queen_blunder,
+            "Engine blundered queen with Qg5! Score: {}, PV should not start with d8g5",
+            result.score
+        );
+
+        // Print the actual move for debugging
+        let from_str = format!(
+            "{}{}",
+            (b'a' + best_move.from.file()) as char,
+            (b'1' + best_move.from.rank()) as char
+        );
+        let to_str = format!(
+            "{}{}",
+            (b'a' + best_move.to.file()) as char,
+            (b'1' + best_move.to.rank()) as char
+        );
+        eprintln!("Best move at depth 10: {}{}, score: {}", from_str, to_str, result.score);
+    }
+
 }

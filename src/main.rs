@@ -145,6 +145,8 @@ fn main() {
             // Engine's turn
             println!("\nEngine thinking (depth {})...", search_depth);
 
+            // Don't clear TT between moves - let aspiration fix handle the issue
+
             let start = std::time::Instant::now();
             let result = engine.search(&board, SearchLimits::depth(search_depth));
             let elapsed = start.elapsed();
