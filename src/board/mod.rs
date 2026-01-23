@@ -91,6 +91,14 @@ impl Board {
         self.side_to_move
     }
 
+    pub fn castling_rights(&self) -> CastlingRights {
+        self.castling_rights
+    }
+
+    pub fn en_passant_square(&self) -> Option<Square> {
+        self.en_passant_square
+    }
+
     pub fn piece_bitboard(&self, color: Color, piece_type: PieceType) -> Bitboard {
         self.piece_bitboards[color as usize][piece_type as usize]
     }
