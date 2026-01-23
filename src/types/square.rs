@@ -21,6 +21,13 @@ impl Square {
         self.0 as usize
     }
 
+    /// Convert to algebraic notation (e.g., "e4", "a1")
+    pub fn to_algebraic(self) -> String {
+        let file_char = (b'a' + self.file()) as char;
+        let rank_char = (b'1' + self.rank()) as char;
+        format!("{}{}", file_char, rank_char)
+    }
+
     /// Parse a square from algebraic notation (e.g., "e4", "a1")
     pub fn from_algebraic(s: &str) -> Result<Self, crate::FenError> {
         let bytes = s.as_bytes();

@@ -1,4 +1,5 @@
 use lemonate::board::{Board, Move, MoveType};
+use lemonate::book::{BookManager, BookMoveSelection};
 use lemonate::eval::Evaluator;
 use lemonate::search::{is_mate_score, mate_in, SearchEngine, SearchLimits};
 use lemonate::types::{Color, PieceType, Square};
@@ -6,6 +7,9 @@ use std::io::{self, Write};
 
 /// Default search depth for the engine.
 const DEFAULT_DEPTH: u8 = 6;
+
+/// Path to the opening book.
+const BOOK_PATH: &str = "bins/Perfect2021.bin";
 
 fn main() {
     println!("=== Lemonate Chess Engine ===\n");
@@ -18,9 +22,17 @@ fn main() {
     let mut engine = SearchEngine::new();
     let mut search_depth = DEFAULT_DEPTH;
 
+    // Load opening book
+    let mut book = BookManager::new();
+    book.selection = BookMoveSelection::WeightedRandom;
+    match book.load(BOOK_PATH) {
+        Ok(()) => println!("Loaded opening book ({} positions)", book.len()),
+        Err(e) => println!("Warning: Could not load opening book: {}", e),
+    }
+
     println!("Starting new game. You are White, engine is Black.");
     println!("Enter moves in algebraic notation (e.g., 'e2e4' or 'e7e8q' for promotion)");
-    println!("Commands: 'quit', 'fen', 'moves', 'eval', 'depth <n>', 'undo'\n");
+    println!("Commands: 'quit', 'fen', 'moves', 'eval', 'depth <n>', 'undo', 'book'\n");
 
     'game: loop {
         // Display the board
@@ -107,6 +119,19 @@ fn main() {
                     continue;
                 }
 
+                if input == "book" {
+                    let book_moves = book.probe_all(&board);
+                    if book_moves.is_empty() {
+                        println!("No book moves for this position.");
+                    } else {
+                        println!("\nBook moves ({}):", book_moves.len());
+                        for (mv, weight) in &book_moves {
+                            println!("  {} (weight: {})", move_to_string(mv), weight);
+                        }
+                    }
+                    continue;
+                }
+
                 if input.starts_with("depth ") {
                     if let Ok(d) = input[6..].trim().parse::<u8>() {
                         if d >= 1 && d <= 20 {
@@ -151,66 +176,72 @@ fn main() {
             println!("You played: {}", move_to_string(&user_move));
         } else {
             // Engine's turn
-            println!("\nEngine thinking (depth {})...", search_depth);
-
-            // Don't clear TT between moves - let aspiration fix handle the issue
-
-            let start = std::time::Instant::now();
-            let result = engine.search(&board, SearchLimits::depth(search_depth));
-            let elapsed = start.elapsed();
-
-            if let Some(engine_move) = result.best_move {
-                board.make_move(engine_move);
-
-                // Format the score
-                let score_str = if is_mate_score(result.score) {
-                    if let Some(moves) = mate_in(result.score) {
-                        if result.score > 0 {
-                            format!("M{}", moves)
-                        } else {
-                            format!("-M{}", moves)
-                        }
-                    } else {
-                        format!("{:+}", result.score)
-                    }
-                } else {
-                    format!("{:+.2}", result.score as f64 / 100.0)
-                };
-
-                println!("Engine played: {}", move_to_string(&engine_move));
-
-                // Show search info
-                println!("\n--- Search Info ---");
-                println!("  Score:      {} pawns", score_str);
-                println!("  Depth:      {}/{}", result.depth, result.stats.seldepth);
-                println!("  Nodes:      {}", format_nodes(result.stats.nodes));
-                println!(
-                    "  Time:       {:.2}s",
-                    elapsed.as_secs_f64()
-                );
-                println!(
-                    "  NPS:        {}",
-                    format_nodes(result.stats.nps(elapsed.as_millis()))
-                );
-
-                // Show principal variation
-                if !result.pv.is_empty() {
-                    print!("  PV:         ");
-                    for (i, mv) in result.pv.iter().take(6).enumerate() {
-                        if i > 0 {
-                            print!(" ");
-                        }
-                        print!("{}", move_to_string(mv));
-                    }
-                    if result.pv.len() > 6 {
-                        print!(" ...");
-                    }
-                    println!();
-                }
-
+            // First, check the opening book
+            if let Some(book_move) = book.probe(&board) {
+                board.make_move(book_move);
+                println!("\nEngine played: {} (book)", move_to_string(&book_move));
                 print_material_count(&board);
             } else {
-                println!("Engine has no legal moves!");
+                // No book move, search normally
+                println!("\nEngine thinking (depth {})...", search_depth);
+
+                let start = std::time::Instant::now();
+                let result = engine.search(&board, SearchLimits::depth(search_depth));
+                let elapsed = start.elapsed();
+
+                if let Some(engine_move) = result.best_move {
+                    board.make_move(engine_move);
+
+                    // Format the score
+                    let score_str = if is_mate_score(result.score) {
+                        if let Some(moves) = mate_in(result.score) {
+                            if result.score > 0 {
+                                format!("M{}", moves)
+                            } else {
+                                format!("-M{}", moves)
+                            }
+                        } else {
+                            format!("{:+}", result.score)
+                        }
+                    } else {
+                        format!("{:+.2}", result.score as f64 / 100.0)
+                    };
+
+                    println!("Engine played: {}", move_to_string(&engine_move));
+
+                    // Show search info
+                    println!("\n--- Search Info ---");
+                    println!("  Score:      {} pawns", score_str);
+                    println!("  Depth:      {}/{}", result.depth, result.stats.seldepth);
+                    println!("  Nodes:      {}", format_nodes(result.stats.nodes));
+                    println!(
+                        "  Time:       {:.2}s",
+                        elapsed.as_secs_f64()
+                    );
+                    println!(
+                        "  NPS:        {}",
+                        format_nodes(result.stats.nps(elapsed.as_millis()))
+                    );
+
+                    // Show principal variation
+                    if !result.pv.is_empty() {
+                        print!("  PV:         ");
+                        for (i, mv) in result.pv.iter().take(6).enumerate() {
+                            if i > 0 {
+                                print!(" ");
+                            }
+                            print!("{}", move_to_string(mv));
+                        }
+                        if result.pv.len() > 6 {
+                            print!(" ...");
+                        }
+                        println!();
+                    }
+
+                    print_material_count(&board);
+                } else {
+                    println!("Engine has no legal moves!");
+                }
             }
         }
 
