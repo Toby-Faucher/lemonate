@@ -70,7 +70,14 @@ fn main() {
                 io::stdout().flush().unwrap();
 
                 let mut input = String::new();
-                io::stdin().read_line(&mut input).unwrap();
+                let bytes_read = io::stdin().read_line(&mut input).unwrap();
+
+                // Handle EOF (e.g., piped input ended)
+                if bytes_read == 0 {
+                    println!("\nEnd of input. Goodbye!");
+                    return;
+                }
+
                 let input = input.trim().to_lowercase();
 
                 if input == "quit" {
@@ -130,9 +137,10 @@ fn main() {
                 match parse_move(&input, &legal_moves) {
                     Some(mv) => break mv,
                     None => {
-                        println!(
-                            "Invalid move! Try again (e.g., 'e2e4' or type 'moves' to see legal moves)"
-                        );
+                        println!("Invalid move '{}'. Format: <from><to>[promotion]", input);
+                        println!("  Examples: e2e4, g1f3, e7e8q (pawn promotion to queen)");
+                        println!("  Castling: o-o (kingside), o-o-o (queenside)");
+                        println!("  Type 'moves' to see all legal moves, or 'quit' to exit.");
                         continue;
                     }
                 }
