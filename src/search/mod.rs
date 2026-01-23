@@ -252,10 +252,9 @@ impl SearchEngine {
             self.pv_table = vec![Vec::new(); depth as usize + 1];
 
             // Search at this depth.
-            let (score, best_move) = if depth >= 4 && !is_mate_score(result.score) {
-                self.aspiration_search(&mut board, depth, result.score)
-            } else {
-                // Full window search for first few depths or after finding mate.
+            // TEMPORARILY DISABLED: Aspiration windows to debug queen blunder
+            let (score, best_move) = {
+                // Full window search.
                 let score = self.negamax(&mut board, depth as i32, -INFINITY, INFINITY, 0);
                 let best_move = if !self.pv_table.is_empty() && !self.pv_table[0].is_empty() {
                     Some(self.pv_table[0][0])
@@ -386,22 +385,22 @@ impl SearchEngine {
             return self.evaluator.evaluate(board);
         }
 
-        let is_root = ply == 0;
+        let _is_root = ply == 0;
         let hash = board.position_hash();
         let is_pv = beta - alpha > 1;
 
-        // Probe transposition table.
-        let mut hash_move = None;
+        // TT probing - get hash move and potentially cutoff
+        let mut hash_move: Option<Move> = None;
         if let Some(entry) = self.tt.probe(hash) {
             self.stats.tt_hits += 1;
             hash_move = entry.best_move;
 
-            // Use TT score for cutoffs (not at root, not PV nodes).
-            if !is_root && !is_pv && entry.depth >= depth as u8 {
+            // TT cutoff for non-PV nodes with sufficient depth
+            if !is_pv && entry.depth >= depth as u8 {
                 if let Some(score) = entry.get_score(alpha, beta) {
                     self.stats.tt_cutoffs += 1;
-                    // Adjust mate scores for current ply distance.
-                    return TranspositionTable::adjust_score_for_retrieval(score, ply);
+                    let adjusted = TranspositionTable::adjust_score_for_retrieval(score, ply);
+                    return adjusted;
                 }
             }
         }
@@ -424,7 +423,7 @@ impl SearchEngine {
         let static_eval = self.evaluator.evaluate(board);
         let in_check = board.is_in_check();
 
-        // Null move pruning.
+        // Null move pruning
         if !is_pv
             && !in_check
             && depth >= NULL_MOVE_MIN_DEPTH
@@ -458,10 +457,10 @@ impl SearchEngine {
         let mut move_count = 0;
         let mut quiets_tried = Vec::new();
 
-        // Futility pruning flag.
+        // Futility pruning conditions
         let can_futility_prune = !is_pv
             && !in_check
-            && depth <= 3
+            && depth <= LMR_REDUCTION_LIMIT
             && static_eval + self.futility_margin(depth) <= alpha;
 
         // Search moves.
@@ -478,11 +477,12 @@ impl SearchEngine {
             // Make the move.
             board.make_move(mv);
 
-            // Late move reductions.
+            // Late move reductions
             let reduction = if move_count > LMR_FULL_DEPTH_MOVES
                 && depth >= LMR_REDUCTION_LIMIT
                 && !is_tactical
                 && !in_check
+                && !board.is_in_check() // Don't reduce moves that give check
             {
                 self.late_move_reduction(depth, move_count, &mv)
             } else {

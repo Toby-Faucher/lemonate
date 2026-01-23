@@ -1,3 +1,4 @@
+use crate::types::Color;
 use crate::Board;
 
 mod king_safety;
@@ -40,7 +41,14 @@ impl Evaluator {
         let pawn_score = self.pawn_structure.evaluate(board);
         let king_score = self.king_safety.evaluate(board);
         let mobility_score = self.mobility.evaluate(board);
-        pst_score + pawn_score + king_score + mobility_score
+        let score = pst_score + pawn_score + king_score + mobility_score;
+
+        // Return score from side-to-move's perspective for negamax
+        if board.side_to_move() == Color::White {
+            score
+        } else {
+            -score
+        }
     }
 
     pub fn evaluate_detailed(&self, board: &Board) -> EvalDetails {

@@ -202,10 +202,15 @@ impl TranspositionTable {
         let existing = &self.entries[index];
 
         // Determine if we should replace the existing entry.
+        // Key insight: We must handle hash collisions (different positions mapping
+        // to same index) differently from same-position updates.
+        // - Different position (collision): always replace to store our position
+        // - Same position: only replace if new depth >= existing depth
+        //   (prevents shallow aspiration re-searches from overwriting deeper results)
         let should_replace = existing.is_empty()
-            || existing.hash == hash  // Same position, always update
+            || existing.hash != hash  // Different position (hash collision), must replace
             || existing.age != self.current_age  // Old entry from previous search
-            || depth >= existing.depth;  // New search is at least as deep
+            || depth >= existing.depth;  // Same position, new search is at least as deep
 
         if should_replace {
             // Preserve best move from existing entry if we don't have one
@@ -402,10 +407,11 @@ mod tests {
         tt.store(hash, 100, 3, EntryType::Exact, None);
         assert_eq!(tt.probe(hash).unwrap().depth, 3);
 
-        // Try to store at depth 2 - should NOT replace (lower depth).
+        // Try to store at depth 2 - should NOT replace (lower depth, same position).
+        // This prevents shallow aspiration re-searches from overwriting deeper results.
         tt.store(hash, 200, 2, EntryType::Exact, None);
-        // With same hash, we always replace.
-        assert_eq!(tt.probe(hash).unwrap().score, 200);
+        assert_eq!(tt.probe(hash).unwrap().score, 100); // Original score preserved
+        assert_eq!(tt.probe(hash).unwrap().depth, 3);   // Original depth preserved
 
         // Store at depth 5 - should replace (higher depth).
         tt.store(hash, 300, 5, EntryType::Exact, None);
