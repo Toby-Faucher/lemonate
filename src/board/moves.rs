@@ -413,7 +413,7 @@ impl Board {
         // Determine direction and special ranks based on color
         let (direction, start_rank, promotion_rank) = match color {
             Color::White => (1i8, 1u8, 7u8),
-            Color::Black => (-1i8, 6u8, 1u8),
+            Color::Black => (-1i8, 6u8, 0u8),
         };
 
         // Pawn captures (including normal captures and en passant)
