@@ -122,6 +122,12 @@ impl<'a> MoveOrderer<'a> {
             ply,
         };
         orderer.score_moves(board);
+        // Sort once up front so `next()` is O(1) instead of doing a fresh
+        // linear scan for the max on every call (was O(n^2) per node via
+        // selection sort). Use a stable sort so ties (e.g. quiet moves with
+        // identical history score) keep natural move-generation order rather
+        // than an arbitrary unstable order.
+        orderer.moves.sort_by(|a, b| b.score.cmp(&a.score));
         orderer
     }
 
@@ -140,16 +146,28 @@ impl<'a> MoveOrderer<'a> {
                 }
             }
 
-            // Captures are scored by SEE or MVV-LVA.
-            if mv.captured.is_some() {
-                let see_score = see(board, mv);
-                if see_score >= 0 {
+            // Captures are scored by MVV-LVA; SEE is only invoked when the
+            // attacker is worth more than the victim, since those are the
+            // only captures that can plausibly lose material (avoids paying
+            // for a full SEE walk on every capture, which dominated node
+            // cost in profiling).
+            if let Some(victim) = mv.captured {
+                let attacker_value = SEE_PIECE_VALUES[mv.piece.piece_type as usize];
+                let victim_value = SEE_PIECE_VALUES[victim.piece_type as usize];
+
+                let see_score = if attacker_value > victim_value {
+                    Some(see(board, mv))
+                } else {
+                    None
+                };
+
+                if see_score.is_none_or(|s| s >= 0) {
                     // Good capture: base score + MVV-LVA for ordering among good captures.
                     scored_move.score =
-                        scores::GOOD_CAPTURE + mvv_lva_score(mv.piece.piece_type, mv.captured.unwrap().piece_type);
+                        scores::GOOD_CAPTURE + mvv_lva_score(mv.piece.piece_type, victim.piece_type);
                 } else {
                     // Bad capture: negative score.
-                    scored_move.score = scores::BAD_CAPTURE + see_score;
+                    scored_move.score = scores::BAD_CAPTURE + see_score.unwrap();
                 }
                 continue;
             }
@@ -175,29 +193,15 @@ impl<'a> MoveOrderer<'a> {
         }
     }
 
-    /// Get the next best move using partial sorting.
+    /// Get the next best move.
     ///
-    /// Uses selection sort to find the best remaining move,
-    /// which is more efficient than full sorting when we expect
-    /// early cutoffs.
+    /// Moves are sorted by score once in `new()`, so this is just a linear
+    /// walk through the already-ordered list.
     pub fn next(&mut self) -> Option<Move> {
         if self.current >= self.moves.len() {
             return None;
         }
 
-        // Find the best move from current position onwards.
-        let mut best_idx = self.current;
-        let mut best_score = self.moves[self.current].score;
-
-        for i in (self.current + 1)..self.moves.len() {
-            if self.moves[i].score > best_score {
-                best_score = self.moves[i].score;
-                best_idx = i;
-            }
-        }
-
-        // Swap best move to current position.
-        self.moves.swap(self.current, best_idx);
         let mv = self.moves[self.current].mv;
         self.current += 1;
 

@@ -34,12 +34,14 @@ mod transposition;
 
 pub use history::{CounterMoveTable, HistoryTable};
 pub use killer_moves::KillerMoveTable;
-pub use move_ordering::{is_good_capture, order_captures, MoveOrderer, ScoredMove};
+pub use move_ordering::{is_good_capture, order_captures, see, MoveOrderer, ScoredMove};
 pub use time_manager::{SearchLimits, TimeControl, TimeManager};
 pub use transposition::{EntryType, TranspositionEntry, TranspositionTable};
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+
+use once_cell::sync::Lazy;
 
 use crate::board::{Move, MoveType};
 use crate::eval::Evaluator;
@@ -70,6 +72,25 @@ pub const FUTILITY_MARGIN_BASE: i32 = 150;
 
 /// Aspiration window initial size.
 pub const ASPIRATION_WINDOW: i32 = 50;
+
+/// Bounds of the precomputed LMR table.
+const LMR_TABLE_DEPTH: usize = 128;
+const LMR_TABLE_MOVE_COUNT: usize = 64;
+
+/// Precomputed late-move-reduction table, indexed by `[depth][move_count]`
+/// (both clamped to the table bounds). Avoids calling `f64::ln()` on every
+/// reducible move in the hot search path.
+static LMR_TABLE: Lazy<[[i32; LMR_TABLE_MOVE_COUNT]; LMR_TABLE_DEPTH]> = Lazy::new(|| {
+    let mut table = [[0i32; LMR_TABLE_MOVE_COUNT]; LMR_TABLE_DEPTH];
+    for (depth, row) in table.iter_mut().enumerate().skip(1) {
+        let ln_depth = (depth as f64).ln();
+        for (move_count, entry) in row.iter_mut().enumerate().skip(1) {
+            let ln_move_count = (move_count as f64).ln();
+            *entry = (ln_depth * ln_move_count / 2.0) as i32;
+        }
+    }
+    table
+});
 
 /// Check if a score is a mate score.
 #[inline]
@@ -270,10 +291,14 @@ impl SearchEngine {
             // Initialize PV table for this depth.
             self.pv_table = vec![Vec::new(); depth as usize + 1];
 
-            // Search at this depth.
-            // TEMPORARILY DISABLED: Aspiration windows to debug queen blunder
-            let (score, best_move) = {
-                // Full window search.
+            // Search at this depth. Use a narrow aspiration window once we
+            // have a stable previous-iteration score to seed it with; fall
+            // back to a full window for shallow depths or after a mate score
+            // (aspiration_search widens/falls back to full window itself on
+            // fail-high/fail-low).
+            let (score, best_move) = if depth >= 4 && !is_mate_score(result.score) {
+                self.aspiration_search(&mut board, depth, result.score)
+            } else {
                 let score = self.negamax(&mut board, depth as i32, -INFINITY, INFINITY, 0);
                 let best_move = if !self.pv_table.is_empty() && !self.pv_table[0].is_empty() {
                     Some(self.pv_table[0][0])
@@ -318,6 +343,14 @@ impl SearchEngine {
         let mut beta = previous_score + delta;
 
         loop {
+            // Reset the PV table before each attempt. Without this, a
+            // fail-high/fail-low retry at a wider window can inherit stale
+            // deeper-ply continuations left behind by the previous attempt's
+            // partial search, corrupting the reported PV beyond the root move.
+            for line in self.pv_table.iter_mut() {
+                line.clear();
+            }
+
             let score = self.negamax(board, depth as i32, alpha, beta, 0);
 
             // Check for time out.
@@ -350,8 +383,7 @@ impl SearchEngine {
             }
 
             // Fallback to full window if delta gets too large.
-            // Lower threshold (200 instead of 500) to reduce aspiration bugs.
-            if delta > 200 {
+            if delta > 500 {
                 alpha = -INFINITY;
                 beta = INFINITY;
             }
@@ -424,25 +456,13 @@ impl SearchEngine {
             }
         }
 
-        // Generate legal moves.
-        let moves = board.generate_legal_moves();
-
-        // Check for checkmate or stalemate.
-        if moves.is_empty() {
-            return if board.is_in_check() {
-                // Checkmate - return negative mate score.
-                -MATE_SCORE + ply as i32
-            } else {
-                // Stalemate.
-                0
-            };
-        }
-
-        // Static evaluation for pruning decisions.
+        // Static evaluation and check status, needed for null move pruning
+        // before we pay for move generation (which involves board cloning).
         let static_eval = self.evaluator.evaluate(board);
         let in_check = board.is_in_check();
 
-        // Null move pruning
+        // Null move pruning - attempt this before generating moves so a
+        // cutoff avoids the cost of move generation entirely.
         if !is_pv
             && !in_check
             && depth >= NULL_MOVE_MIN_DEPTH
@@ -452,6 +472,20 @@ impl SearchEngine {
             if let Some(score) = self.null_move_prune(board, depth, beta, ply) {
                 return score;
             }
+        }
+
+        // Generate legal moves.
+        let moves = board.generate_legal_moves();
+
+        // Check for checkmate or stalemate.
+        if moves.is_empty() {
+            return if in_check {
+                // Checkmate - return negative mate score.
+                -MATE_SCORE + ply as i32
+            } else {
+                // Stalemate.
+                0
+            };
         }
 
         // Create move orderer and collect all moves in order.
@@ -494,7 +528,7 @@ impl SearchEngine {
             }
 
             // Make the move.
-            board.make_move(mv);
+            board.make_move_known_legal(mv);
 
             // Late move reductions
             let reduction = if move_count > LMR_FULL_DEPTH_MOVES
@@ -682,13 +716,13 @@ impl SearchEngine {
                 }
 
                 // Skip bad captures (SEE negative).
-                if !is_good_capture(board, &mv) {
+                if see(board, &mv) < 0 {
                     continue;
                 }
             }
 
             // Make the move.
-            board.make_move(mv);
+            board.make_move_known_legal(mv);
             let score = -self.quiescence(board, -beta, -alpha, ply + 1);
             board.unmake_move();
 
@@ -769,12 +803,11 @@ impl SearchEngine {
     /// # Returns
     /// The reduction amount (0 if no reduction).
     fn late_move_reduction(&self, depth: i32, move_count: usize, _mv: &Move) -> i32 {
-        // Simple LMR formula.
-        // More aggressive reductions for later moves and higher depths.
-        let ln_depth = (depth as f64).ln();
-        let ln_move_count = (move_count as f64).ln();
-
-        let reduction = (ln_depth * ln_move_count / 2.0) as i32;
+        // Look up the precomputed ln(depth)*ln(move_count)/2 table instead of
+        // calling f64::ln() per move.
+        let depth_idx = (depth.max(0) as usize).min(LMR_TABLE_DEPTH - 1);
+        let move_idx = move_count.min(LMR_TABLE_MOVE_COUNT - 1);
+        let reduction = LMR_TABLE[depth_idx][move_idx];
 
         // Clamp reduction to not reduce too aggressively.
         reduction.min(depth - 1).max(1)
@@ -832,7 +865,7 @@ impl SearchEngine {
                     let legal_moves = board.generate_legal_moves();
                     if legal_moves.contains(&mv) {
                         pv.push(mv);
-                        board.make_move(mv);
+                        board.make_move_known_legal(mv);
                     } else {
                         break;
                     }
