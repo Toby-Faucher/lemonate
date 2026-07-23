@@ -53,6 +53,30 @@ impl Board {
         true
     }
 
+    /// Makes a move known to already be legal (e.g. sourced from
+    /// `generate_legal_moves`), skipping the `is_legal_move` re-check that
+    /// `make_move` performs. This avoids an extra full-board clone per move
+    /// in the search hot path, where legality was already established during
+    /// move generation.
+    pub(crate) fn make_move_known_legal(&mut self, mv: Move) {
+        let state = BoardState {
+            castling_rights: self.castling_rights,
+            en_passant_square: self.en_passant_square,
+            halfmove_clock: self.halfmove_clock,
+            position_hash: self.position_hash,
+            captured_piece: mv.captured,
+        };
+
+        self.execute_move(mv);
+
+        if self.move_history.is_none() {
+            self.move_history = Some(Vec::new());
+        }
+        if let Some(ref mut history) = self.move_history {
+            history.push((mv, state));
+        }
+    }
+
     /// Unmakes the last move, restoring the previous board state
     /// Returns true if successful, false if no moves to unmake
     pub fn unmake_move(&mut self) -> bool {
