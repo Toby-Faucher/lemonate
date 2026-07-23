@@ -38,6 +38,9 @@ pub use move_ordering::{is_good_capture, order_captures, MoveOrderer, ScoredMove
 pub use time_manager::{SearchLimits, TimeControl, TimeManager};
 pub use transposition::{EntryType, TranspositionEntry, TranspositionTable};
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
 use crate::board::{Move, MoveType};
 use crate::eval::Evaluator;
 use crate::types::PieceType;
@@ -167,6 +170,10 @@ pub struct SearchEngine {
     stats: SearchStats,
     /// Principal variation table.
     pv_table: Vec<Vec<Move>>,
+    /// Stop flag shared with the time manager. Persists across searches so
+    /// callers (e.g. the UCI "stop" handler, possibly on another thread)
+    /// can obtain a handle before a search even starts.
+    stop_flag: Arc<AtomicBool>,
 }
 
 impl SearchEngine {
@@ -181,7 +188,14 @@ impl SearchEngine {
             time_manager: TimeManager::default(),
             stats: SearchStats::default(),
             pv_table: Vec::new(),
+            stop_flag: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Get a handle that can be used to signal the current (or next) search
+    /// to stop, from any thread.
+    pub fn stop_handle(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.stop_flag)
     }
 
     /// Create a search engine with custom transposition table size.
@@ -206,8 +220,13 @@ impl SearchEngine {
     ///
     /// This is the main entry point for the search.
     pub fn search(&mut self, board: &Board, limits: SearchLimits) -> SearchResult {
-        // Create and start time manager.
-        self.time_manager = TimeManager::new(&limits);
+        // Reset the stop flag for this search (it may have been set by a
+        // "stop" command left over from a previous search).
+        self.stop_flag.store(false, Ordering::Relaxed);
+
+        // Create and start time manager, sharing our persistent stop flag
+        // so it can be signalled externally while the search is running.
+        self.time_manager = TimeManager::with_stop_flag(&limits, Arc::clone(&self.stop_flag));
         self.time_manager.start();
 
         // Store max depth from limits.

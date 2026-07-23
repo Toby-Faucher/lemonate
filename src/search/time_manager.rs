@@ -8,6 +8,8 @@
 //! - Support sudden death and increment time controls
 //! - Allow early termination when best move is stable
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Default number of moves to assume remaining in sudden death.
@@ -128,8 +130,10 @@ pub struct TimeManager {
     base_soft_limit: Duration,
     /// Original hard limit (before adjustments).
     base_hard_limit: Duration,
-    /// Whether the search has been stopped.
-    stopped: bool,
+    /// Whether the search has been stopped. Shared so an external thread
+    /// (e.g. the UCI "stop" command handler) can signal termination while
+    /// the search is running on a different thread.
+    stopped: Arc<AtomicBool>,
     /// Nodes searched (for node limit checking).
     nodes_searched: u64,
     /// Node limit (if any).
@@ -141,6 +145,13 @@ pub struct TimeManager {
 impl TimeManager {
     /// Create a new time manager with the given limits.
     pub fn new(limits: &SearchLimits) -> Self {
+        Self::with_stop_flag(limits, Arc::new(AtomicBool::new(false)))
+    }
+
+    /// Create a new time manager that also honors an externally-owned stop
+    /// flag, so a "stop" command received on another thread can terminate
+    /// the search in progress.
+    pub fn with_stop_flag(limits: &SearchLimits, stop_flag: Arc<AtomicBool>) -> Self {
         let (soft_limit, hard_limit, use_time_limit) = match &limits.time_control {
             TimeControl::FixedDepth(_) => {
                 // No time limit for fixed depth.
@@ -173,17 +184,23 @@ impl TimeManager {
             hard_limit,
             base_soft_limit: soft_limit,
             base_hard_limit: hard_limit,
-            stopped: false,
+            stopped: stop_flag,
             nodes_searched: 0,
             node_limit: limits.max_nodes,
             use_time_limit,
         }
     }
 
+    /// Get a handle to the stop flag so another thread can signal this
+    /// search to terminate.
+    pub fn stop_handle(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.stopped)
+    }
+
     /// Start the clock for a new search.
     pub fn start(&mut self) {
         self.start_time = Instant::now();
-        self.stopped = false;
+        self.stopped.store(false, Ordering::Relaxed);
         self.nodes_searched = 0;
     }
 
@@ -193,7 +210,7 @@ impl TimeManager {
     #[inline]
     pub fn should_stop(&self) -> bool {
         // Check stop flag first (fastest).
-        if self.stopped {
+        if self.stopped.load(Ordering::Relaxed) {
             return true;
         }
 
@@ -218,7 +235,7 @@ impl TimeManager {
     /// Uses the soft limit to make this decision.
     #[inline]
     pub fn can_start_iteration(&self) -> bool {
-        if self.stopped {
+        if self.stopped.load(Ordering::Relaxed) {
             return false;
         }
 
@@ -232,13 +249,13 @@ impl TimeManager {
 
     /// Signal that the search should stop immediately.
     pub fn stop(&mut self) {
-        self.stopped = true;
+        self.stopped.store(true, Ordering::Relaxed);
     }
 
     /// Check if the search has been manually stopped.
     #[inline]
     pub fn is_stopped(&self) -> bool {
-        self.stopped
+        self.stopped.load(Ordering::Relaxed)
     }
 
     /// Get elapsed time since search start.
@@ -376,7 +393,7 @@ impl Default for TimeManager {
             hard_limit: Duration::MAX,
             base_soft_limit: Duration::MAX,
             base_hard_limit: Duration::MAX,
-            stopped: false,
+            stopped: Arc::new(AtomicBool::new(false)),
             nodes_searched: 0,
             node_limit: None,
             use_time_limit: false,
