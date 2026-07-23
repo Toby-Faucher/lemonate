@@ -15,10 +15,14 @@ use crate::types::Color;
 /// Maximum history score before scaling.
 pub const MAX_HISTORY_SCORE: i32 = 16384;
 
-/// History bonus formula: depth * depth
+/// History bonus formula: linear in depth (Stockfish-style).
+///
+/// `300 * depth - 250`, clamped to be non-negative and capped at
+/// `MAX_HISTORY_SCORE` so a single update can never exceed the table's
+/// own ceiling.
 #[inline]
 fn history_bonus(depth: i32) -> i32 {
-    depth * depth
+    (300 * depth - 250).clamp(0, MAX_HISTORY_SCORE)
 }
 
 /// History table for quiet move ordering.
@@ -87,7 +91,8 @@ impl HistoryTable {
     pub fn update_penalty(&mut self, color: Color, mv: &Move, depth: i32) {
         let from = mv.from.index();
         let to = mv.to.index();
-        let penalty = history_bonus(depth);
+        // Penalize less aggressively than we reward: half the bonus magnitude.
+        let penalty = history_bonus(depth) / 2;
 
         // Apply penalty with gravity scaling.
         let current = self.history[color as usize][from][to];
@@ -205,6 +210,96 @@ impl Default for CounterMoveTable {
     }
 }
 
+/// Continuation history heuristic.
+///
+/// A magnitude-aware extension of [`CounterMoveTable`]: instead of storing a
+/// single "best reply" per previous move, it scores *every* candidate move as
+/// a reply to the opponent's previous move, using the same gravity-scaled
+/// update as [`HistoryTable`]. This preserves diversity that a single-slot
+/// counter move table loses.
+///
+/// Indexed by `[previous_move.piece_type][previous_move.to_square]` for the
+/// opponent's move, then `[mv.from_square][mv.to_square]` for our candidate
+/// reply.
+///
+/// Conceptually indexed as `[piece_type; 6][to_square; 64][from_square; 64][to_square; 64]`,
+/// but stored as a flat heap-allocated buffer (via `vec!`) to avoid
+/// constructing a ~6 MiB nested array on the stack.
+pub struct ContinuationHistory {
+    /// Flat continuation scores, indexed via [`Self::index`].
+    scores: Vec<i32>,
+}
+
+/// Dimensions of the conceptual `[piece_type][prev_to][from][to]` table.
+const CH_PIECE_TYPES: usize = 6;
+const CH_SQUARES: usize = 64;
+const CH_SIZE: usize = CH_PIECE_TYPES * CH_SQUARES * CH_SQUARES * CH_SQUARES;
+
+impl ContinuationHistory {
+    /// Create a new empty continuation history table.
+    pub fn new() -> Self {
+        Self {
+            scores: vec![0; CH_SIZE],
+        }
+    }
+
+    /// Clear all continuation history scores (call at start of new game).
+    pub fn clear(&mut self) {
+        for score in &mut self.scores {
+            *score = 0;
+        }
+    }
+
+    #[inline]
+    fn index(previous_move: &Move, mv: &Move) -> usize {
+        let piece_type = previous_move.piece.piece_type as usize;
+        let prev_to = previous_move.to.index();
+        let from = mv.from.index();
+        let to = mv.to.index();
+        ((piece_type * CH_SQUARES + prev_to) * CH_SQUARES + from) * CH_SQUARES + to
+    }
+
+    /// Get the continuation history score for `mv` as a reply to
+    /// `previous_move`.
+    #[inline]
+    pub fn get(&self, previous_move: &Move, mv: &Move) -> i32 {
+        self.scores[Self::index(previous_move, mv)]
+    }
+
+    /// Update the continuation history score for `mv` as a reply to
+    /// `previous_move`.
+    ///
+    /// Uses the same gravity-scaling approach as [`HistoryTable`]: a bonus
+    /// for the move that caused the cutoff, a smaller-magnitude penalty for
+    /// quiet moves that were tried and failed.
+    ///
+    /// # Arguments
+    /// * `previous_move` - The opponent's move we're responding to.
+    /// * `mv` - The candidate reply being scored.
+    /// * `depth` - The remaining search depth.
+    /// * `is_bonus` - `true` to reward (cutoff move), `false` to penalize
+    ///   (failed quiet move).
+    pub fn update(&mut self, previous_move: &Move, mv: &Move, depth: i32, is_bonus: bool) {
+        let idx = Self::index(previous_move, mv);
+
+        let delta = if is_bonus {
+            history_bonus(depth)
+        } else {
+            -(history_bonus(depth) / 2)
+        };
+
+        let current = self.scores[idx];
+        let new_score = current + delta - (current * delta.abs() / MAX_HISTORY_SCORE);
+        self.scores[idx] = new_score.clamp(-MAX_HISTORY_SCORE, MAX_HISTORY_SCORE);
+    }
+}
+
+impl Default for ContinuationHistory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -244,7 +339,7 @@ mod tests {
 
         let score = table.get(Color::White, &mv);
         assert!(score > 0, "Score should be positive after cutoff: {}", score);
-        assert_eq!(score, 25); // depth * depth = 5 * 5 = 25
+        assert_eq!(score, 1250); // 300 * depth - 250 = 300 * 5 - 250 = 1250
     }
 
     #[test]
@@ -443,5 +538,117 @@ mod tests {
 
         assert_eq!(table.get(&prev1), Some(counter1));
         assert_eq!(table.get(&prev2), Some(counter2));
+    }
+
+    // ==================== ContinuationHistory Tests ====================
+
+    #[test]
+    fn test_new_continuation_history_is_zero() {
+        let table = ContinuationHistory::new();
+        let prev = make_move("e7", "e5", PieceType::Pawn);
+        let mv = make_move("g1", "f3", PieceType::Knight);
+
+        assert_eq!(table.get(&prev, &mv), 0);
+    }
+
+    #[test]
+    fn test_continuation_history_bonus_increases_score() {
+        let mut table = ContinuationHistory::new();
+        let prev = make_move("e7", "e5", PieceType::Pawn);
+        let mv = make_move("g1", "f3", PieceType::Knight);
+
+        table.update(&prev, &mv, 5, true);
+
+        let score = table.get(&prev, &mv);
+        assert!(score > 0, "Score should be positive after bonus update: {}", score);
+    }
+
+    #[test]
+    fn test_continuation_history_penalty_decreases_score() {
+        let mut table = ContinuationHistory::new();
+        let prev = make_move("e7", "e5", PieceType::Pawn);
+        let mv = make_move("g1", "f3", PieceType::Knight);
+
+        table.update(&prev, &mv, 5, false);
+
+        let score = table.get(&prev, &mv);
+        assert!(score < 0, "Score should be negative after penalty update: {}", score);
+    }
+
+    #[test]
+    fn test_continuation_history_clamped() {
+        let mut table = ContinuationHistory::new();
+        let prev = make_move("e7", "e5", PieceType::Pawn);
+        let mv = make_move("g1", "f3", PieceType::Knight);
+
+        for _ in 0..1000 {
+            table.update(&prev, &mv, 20, true);
+        }
+
+        let score = table.get(&prev, &mv);
+        assert!(
+            score <= MAX_HISTORY_SCORE,
+            "Score should be clamped: {} <= {}",
+            score,
+            MAX_HISTORY_SCORE
+        );
+    }
+
+    #[test]
+    fn test_continuation_history_clamped_negative() {
+        let mut table = ContinuationHistory::new();
+        let prev = make_move("e7", "e5", PieceType::Pawn);
+        let mv = make_move("g1", "f3", PieceType::Knight);
+
+        for _ in 0..1000 {
+            table.update(&prev, &mv, 20, false);
+        }
+
+        let score = table.get(&prev, &mv);
+        assert!(
+            score >= -MAX_HISTORY_SCORE,
+            "Score should be clamped: {} >= {}",
+            score,
+            -MAX_HISTORY_SCORE
+        );
+    }
+
+    #[test]
+    fn test_continuation_history_previous_move_independent() {
+        let mut table = ContinuationHistory::new();
+        let prev1 = make_move("e7", "e5", PieceType::Pawn);
+        let prev2 = make_move("d7", "d5", PieceType::Pawn);
+        let mv = make_move("g1", "f3", PieceType::Knight);
+
+        table.update(&prev1, &mv, 5, true);
+
+        assert!(table.get(&prev1, &mv) > 0);
+        assert_eq!(table.get(&prev2, &mv), 0);
+    }
+
+    #[test]
+    fn test_continuation_history_current_move_independent() {
+        let mut table = ContinuationHistory::new();
+        let prev = make_move("e7", "e5", PieceType::Pawn);
+        let mv1 = make_move("g1", "f3", PieceType::Knight);
+        let mv2 = make_move("d2", "d4", PieceType::Pawn);
+
+        table.update(&prev, &mv1, 5, true);
+
+        assert!(table.get(&prev, &mv1) > 0);
+        assert_eq!(table.get(&prev, &mv2), 0);
+    }
+
+    #[test]
+    fn test_continuation_history_clear() {
+        let mut table = ContinuationHistory::new();
+        let prev = make_move("e7", "e5", PieceType::Pawn);
+        let mv = make_move("g1", "f3", PieceType::Knight);
+
+        table.update(&prev, &mv, 10, true);
+        assert!(table.get(&prev, &mv) > 0);
+
+        table.clear();
+        assert_eq!(table.get(&prev, &mv), 0);
     }
 }
