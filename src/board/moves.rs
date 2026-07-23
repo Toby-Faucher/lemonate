@@ -46,9 +46,24 @@ impl Board {
         let mut legal_moves = Vec::with_capacity(218); // 218 is the max amount of moves
 
         let pseudo_legal = self.generate_pseudo_legal_moves();
+        let our_color = self.side_to_move;
 
+        // Clone once per call and make/unmake each candidate on the scratch
+        // board instead of cloning per-candidate (was the dominant allocation
+        // cost in search: O(moves) clones per node instead of O(1)).
+        let mut scratch = self.clone();
         for mv in pseudo_legal {
-            if self.is_legal_move(mv) {
+            scratch.make_move_unchecked(mv);
+
+            let king_bb = scratch.piece_bitboards[our_color as usize][PieceType::King as usize];
+            let legal = match king_bb.into_iter().next() {
+                Some(king_square) => !scratch.is_square_attacked(king_square, our_color.opposite()),
+                None => false,
+            };
+
+            scratch.unmake_move_unchecked(mv);
+
+            if legal {
                 legal_moves.push(mv);
             }
         }
@@ -667,5 +682,69 @@ impl Board {
                 color,
             });
         }
+    }
+
+    /// Reverse a `make_move_unchecked` call exactly (bitboards/mailbox only,
+    /// no hash/castling/en-passant state — used solely for the scratch-board
+    /// legality scan in `generate_legal_moves`).
+    fn unmake_move_unchecked(&mut self, mv: Move) {
+        let color = mv.piece.color;
+        let final_piece_type = match mv.move_type {
+            MoveType::Promotion(promo_type) => promo_type,
+            _ => mv.piece.piece_type,
+        };
+
+        // Undo castling rook move first.
+        if mv.move_type == MoveType::Castle {
+            let (rook_from, rook_to) = match (color, mv.to.file()) {
+                (Color::White, 6) => (Square::from_coords(7, 0), Square::from_coords(5, 0)),
+                (Color::White, 2) => (Square::from_coords(0, 0), Square::from_coords(3, 0)),
+                (Color::Black, 6) => (Square::from_coords(7, 7), Square::from_coords(5, 7)),
+                (Color::Black, 2) => (Square::from_coords(0, 7), Square::from_coords(3, 7)),
+                _ => panic!("Invalid castling move"),
+            };
+
+            self.piece_bitboards[color as usize][PieceType::Rook as usize].clear(rook_to);
+            self.color_bitboard[color as usize].clear(rook_to);
+            self.all_pieces.clear(rook_to);
+            self.mailbox[rook_to.index()] = None;
+
+            self.piece_bitboards[color as usize][PieceType::Rook as usize].set(rook_from);
+            self.color_bitboard[color as usize].set(rook_from);
+            self.all_pieces.set(rook_from);
+            self.mailbox[rook_from.index()] = Some(Piece {
+                piece_type: PieceType::Rook,
+                color,
+            });
+        }
+
+        // Remove the piece from the destination square.
+        self.piece_bitboards[color as usize][final_piece_type as usize].clear(mv.to);
+        self.color_bitboard[color as usize].clear(mv.to);
+        self.all_pieces.clear(mv.to);
+        self.mailbox[mv.to.index()] = None;
+
+        // Restore the captured piece, if any.
+        if let Some(captured) = mv.captured {
+            let capture_square = if mv.move_type == MoveType::EnPassant {
+                let direction = if color == Color::White { -1i8 } else { 1i8 };
+                let capture_rank = (mv.to.rank() as i8 + direction) as u8;
+                Square::from_coords(mv.to.file(), capture_rank)
+            } else {
+                mv.to
+            };
+
+            self.piece_bitboards[captured.color as usize][captured.piece_type as usize]
+                .set(capture_square);
+            self.color_bitboard[captured.color as usize].set(capture_square);
+            self.all_pieces.set(capture_square);
+            self.mailbox[capture_square.index()] = Some(captured);
+        }
+
+        // Place the original piece back on the source square.
+        self.piece_bitboards[color as usize][mv.piece.piece_type as usize].set(mv.from);
+        self.color_bitboard[color as usize].set(mv.from);
+        self.all_pieces.set(mv.from);
+        self.mailbox[mv.from.index()] = Some(mv.piece);
     }
 }

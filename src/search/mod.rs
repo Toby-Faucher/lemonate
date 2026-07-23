@@ -32,11 +32,16 @@ mod move_ordering;
 mod time_manager;
 mod transposition;
 
-pub use history::{CounterMoveTable, HistoryTable};
+pub use history::{ContinuationHistory, CounterMoveTable, HistoryTable};
 pub use killer_moves::KillerMoveTable;
-pub use move_ordering::{is_good_capture, order_captures, MoveOrderer, ScoredMove};
+pub use move_ordering::{is_good_capture, order_captures, see, MoveOrderer, ScoredMove};
 pub use time_manager::{SearchLimits, TimeControl, TimeManager};
 pub use transposition::{EntryType, TranspositionEntry, TranspositionTable};
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
+use once_cell::sync::Lazy;
 
 use crate::board::{Move, MoveType};
 use crate::eval::Evaluator;
@@ -67,6 +72,25 @@ pub const FUTILITY_MARGIN_BASE: i32 = 150;
 
 /// Aspiration window initial size.
 pub const ASPIRATION_WINDOW: i32 = 50;
+
+/// Bounds of the precomputed LMR table.
+const LMR_TABLE_DEPTH: usize = 128;
+const LMR_TABLE_MOVE_COUNT: usize = 64;
+
+/// Precomputed late-move-reduction table, indexed by `[depth][move_count]`
+/// (both clamped to the table bounds). Avoids calling `f64::ln()` on every
+/// reducible move in the hot search path.
+static LMR_TABLE: Lazy<[[i32; LMR_TABLE_MOVE_COUNT]; LMR_TABLE_DEPTH]> = Lazy::new(|| {
+    let mut table = [[0i32; LMR_TABLE_MOVE_COUNT]; LMR_TABLE_DEPTH];
+    for (depth, row) in table.iter_mut().enumerate().skip(1) {
+        let ln_depth = (depth as f64).ln();
+        for (move_count, entry) in row.iter_mut().enumerate().skip(1) {
+            let ln_move_count = (move_count as f64).ln();
+            *entry = (ln_depth * ln_move_count / 2.0) as i32;
+        }
+    }
+    table
+});
 
 /// Check if a score is a mate score.
 #[inline]
@@ -159,6 +183,8 @@ pub struct SearchEngine {
     history: HistoryTable,
     /// Counter move table.
     counters: CounterMoveTable,
+    /// Continuation history (magnitude-scored "move B replies to move A").
+    continuation_history: ContinuationHistory,
     /// Position evaluator.
     evaluator: Evaluator,
     /// Time manager.
@@ -167,6 +193,10 @@ pub struct SearchEngine {
     stats: SearchStats,
     /// Principal variation table.
     pv_table: Vec<Vec<Move>>,
+    /// Stop flag shared with the time manager. Persists across searches so
+    /// callers (e.g. the UCI "stop" handler, possibly on another thread)
+    /// can obtain a handle before a search even starts.
+    stop_flag: Arc<AtomicBool>,
 }
 
 impl SearchEngine {
@@ -177,11 +207,19 @@ impl SearchEngine {
             killers: KillerMoveTable::new(),
             history: HistoryTable::new(),
             counters: CounterMoveTable::new(),
+            continuation_history: ContinuationHistory::new(),
             evaluator: Evaluator::new(),
             time_manager: TimeManager::default(),
             stats: SearchStats::default(),
             pv_table: Vec::new(),
+            stop_flag: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Get a handle that can be used to signal the current (or next) search
+    /// to stop, from any thread.
+    pub fn stop_handle(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.stop_flag)
     }
 
     /// Create a search engine with custom transposition table size.
@@ -198,6 +236,7 @@ impl SearchEngine {
         self.killers.clear();
         self.history.clear();
         self.counters.clear();
+        self.continuation_history.clear();
         self.stats.reset();
         self.pv_table.clear();
     }
@@ -206,18 +245,22 @@ impl SearchEngine {
     ///
     /// This is the main entry point for the search.
     pub fn search(&mut self, board: &Board, limits: SearchLimits) -> SearchResult {
-        // Create and start time manager.
-        self.time_manager = TimeManager::new(&limits);
+        // Reset the stop flag for this search (it may have been set by a
+        // "stop" command left over from a previous search).
+        self.stop_flag.store(false, Ordering::Relaxed);
+
+        // Create and start time manager, sharing our persistent stop flag
+        // so it can be signalled externally while the search is running.
+        self.time_manager = TimeManager::with_stop_flag(&limits, Arc::clone(&self.stop_flag));
         self.time_manager.start();
 
         // Store max depth from limits.
         let max_depth = limits.max_depth;
 
-        // Age history table for fresh search.
-        self.history.age();
-
-        // Clear killers for new search.
-        self.killers.clear();
+        // NOTE: History and killer tables are intentionally NOT reset here.
+        // They should persist across searches within the same game so that
+        // move-ordering knowledge accumulated on earlier moves is retained.
+        // A full reset only happens in `new_game()`.
 
         // Increment TT age.
         self.tt.new_search();
@@ -251,10 +294,14 @@ impl SearchEngine {
             // Initialize PV table for this depth.
             self.pv_table = vec![Vec::new(); depth as usize + 1];
 
-            // Search at this depth.
-            // TEMPORARILY DISABLED: Aspiration windows to debug queen blunder
-            let (score, best_move) = {
-                // Full window search.
+            // Search at this depth. Use a narrow aspiration window once we
+            // have a stable previous-iteration score to seed it with; fall
+            // back to a full window for shallow depths or after a mate score
+            // (aspiration_search widens/falls back to full window itself on
+            // fail-high/fail-low).
+            let (score, best_move) = if depth >= 4 && !is_mate_score(result.score) {
+                self.aspiration_search(&mut board, depth, result.score)
+            } else {
                 let score = self.negamax(&mut board, depth as i32, -INFINITY, INFINITY, 0);
                 let best_move = if !self.pv_table.is_empty() && !self.pv_table[0].is_empty() {
                     Some(self.pv_table[0][0])
@@ -299,6 +346,14 @@ impl SearchEngine {
         let mut beta = previous_score + delta;
 
         loop {
+            // Reset the PV table before each attempt. Without this, a
+            // fail-high/fail-low retry at a wider window can inherit stale
+            // deeper-ply continuations left behind by the previous attempt's
+            // partial search, corrupting the reported PV beyond the root move.
+            for line in self.pv_table.iter_mut() {
+                line.clear();
+            }
+
             let score = self.negamax(board, depth as i32, alpha, beta, 0);
 
             // Check for time out.
@@ -331,8 +386,7 @@ impl SearchEngine {
             }
 
             // Fallback to full window if delta gets too large.
-            // Lower threshold (200 instead of 500) to reduce aspiration bugs.
-            if delta > 200 {
+            if delta > 500 {
                 alpha = -INFINITY;
                 beta = INFINITY;
             }
@@ -405,25 +459,13 @@ impl SearchEngine {
             }
         }
 
-        // Generate legal moves.
-        let moves = board.generate_legal_moves();
-
-        // Check for checkmate or stalemate.
-        if moves.is_empty() {
-            return if board.is_in_check() {
-                // Checkmate - return negative mate score.
-                -MATE_SCORE + ply as i32
-            } else {
-                // Stalemate.
-                0
-            };
-        }
-
-        // Static evaluation for pruning decisions.
+        // Static evaluation and check status, needed for null move pruning
+        // before we pay for move generation (which involves board cloning).
         let static_eval = self.evaluator.evaluate(board);
         let in_check = board.is_in_check();
 
-        // Null move pruning
+        // Null move pruning - attempt this before generating moves so a
+        // cutoff avoids the cost of move generation entirely.
         if !is_pv
             && !in_check
             && depth >= NULL_MOVE_MIN_DEPTH
@@ -435,13 +477,32 @@ impl SearchEngine {
             }
         }
 
+        // Generate legal moves.
+        let moves = board.generate_legal_moves();
+
+        // Check for checkmate or stalemate.
+        if moves.is_empty() {
+            return if in_check {
+                // Checkmate - return negative mate score.
+                -MATE_SCORE + ply as i32
+            } else {
+                // Stalemate.
+                0
+            };
+        }
+
+        // The opponent's previous move (if any), used for continuation history.
+        let previous_move = board.last_move();
+
         // Create move orderer and collect all moves in order.
-        let mut orderer = MoveOrderer::new(
+        let mut orderer = MoveOrderer::with_continuation_history(
             board,
             moves,
             hash_move,
             &self.killers,
             &self.history,
+            &self.continuation_history,
+            previous_move,
             ply,
         );
 
@@ -475,7 +536,7 @@ impl SearchEngine {
             }
 
             // Make the move.
-            board.make_move(mv);
+            board.make_move_known_legal(mv);
 
             // Late move reductions
             let reduction = if move_count > LMR_FULL_DEPTH_MOVES
@@ -539,7 +600,14 @@ impl SearchEngine {
 
                         // Update heuristics for quiet moves.
                         if !is_capture {
-                            self.update_cutoff_heuristics(board, &mv, depth, ply, &quiets_tried);
+                            self.update_cutoff_heuristics(
+                                board,
+                                &mv,
+                                depth,
+                                ply,
+                                &quiets_tried,
+                                previous_move,
+                            );
                         }
 
                         // Store in TT with adjusted mate score.
@@ -663,13 +731,13 @@ impl SearchEngine {
                 }
 
                 // Skip bad captures (SEE negative).
-                if !is_good_capture(board, &mv) {
+                if see(board, &mv) < 0 {
                     continue;
                 }
             }
 
             // Make the move.
-            board.make_move(mv);
+            board.make_move_known_legal(mv);
             let score = -self.quiescence(board, -beta, -alpha, ply + 1);
             board.unmake_move();
 
@@ -750,12 +818,11 @@ impl SearchEngine {
     /// # Returns
     /// The reduction amount (0 if no reduction).
     fn late_move_reduction(&self, depth: i32, move_count: usize, _mv: &Move) -> i32 {
-        // Simple LMR formula.
-        // More aggressive reductions for later moves and higher depths.
-        let ln_depth = (depth as f64).ln();
-        let ln_move_count = (move_count as f64).ln();
-
-        let reduction = (ln_depth * ln_move_count / 2.0) as i32;
+        // Look up the precomputed ln(depth)*ln(move_count)/2 table instead of
+        // calling f64::ln() per move.
+        let depth_idx = (depth.max(0) as usize).min(LMR_TABLE_DEPTH - 1);
+        let move_idx = move_count.min(LMR_TABLE_MOVE_COUNT - 1);
+        let reduction = LMR_TABLE[depth_idx][move_idx];
 
         // Clamp reduction to not reduce too aggressively.
         reduction.min(depth - 1).max(1)
@@ -782,6 +849,7 @@ impl SearchEngine {
         depth: i32,
         ply: u8,
         quiets_tried: &[Move],
+        previous_move: Option<Move>,
     ) {
         let color = board.side_to_move();
 
@@ -790,6 +858,18 @@ impl SearchEngine {
 
         // Update history heuristic.
         self.history.update(color, mv, quiets_tried, depth);
+
+        // Update continuation history: reward the cutoff move, penalize the
+        // quiet moves that were tried first and failed, both keyed on the
+        // opponent's previous move.
+        if let Some(prev) = previous_move {
+            self.continuation_history.update(&prev, mv, depth, true);
+            for failed in quiets_tried {
+                if failed != mv {
+                    self.continuation_history.update(&prev, failed, depth, false);
+                }
+            }
+        }
     }
 
     /// Extract principal variation from the transposition table.
@@ -813,7 +893,7 @@ impl SearchEngine {
                     let legal_moves = board.generate_legal_moves();
                     if legal_moves.contains(&mv) {
                         pv.push(mv);
-                        board.make_move(mv);
+                        board.make_move_known_legal(mv);
                     } else {
                         break;
                     }

@@ -18,11 +18,16 @@ use crate::types::{Color, PieceType, Square};
 use crate::Board;
 use once_cell::sync::Lazy;
 
-use super::history::HistoryTable;
+use super::history::{ContinuationHistory, HistoryTable};
 use super::killer_moves::KillerMoveTable;
 
 /// Lazy-initialized attack table for SEE calculations.
 static ATTACK_TABLE: Lazy<AttackTable> = Lazy::new(AttackTable::new);
+
+/// Shared empty continuation history used by [`MoveOrderer::new`], which
+/// doesn't take a continuation history table (e.g. in tests or call sites
+/// that don't track the previous move).
+static EMPTY_CONTINUATION_HISTORY: Lazy<ContinuationHistory> = Lazy::new(ContinuationHistory::new);
 
 /// Score constants for move ordering.
 pub mod scores {
@@ -91,6 +96,10 @@ pub struct MoveOrderer<'a> {
     killers: &'a KillerMoveTable,
     /// Reference to history table.
     history: &'a HistoryTable,
+    /// Reference to continuation history table.
+    continuation_history: &'a ContinuationHistory,
+    /// The opponent's previous move, if known (absent at the root).
+    previous_move: Option<Move>,
     /// Current ply for killer move lookup.
     ply: u8,
 }
@@ -113,15 +122,59 @@ impl<'a> MoveOrderer<'a> {
         history: &'a HistoryTable,
         ply: u8,
     ) -> Self {
+        Self::with_continuation_history(
+            board,
+            moves,
+            hash_move,
+            killers,
+            history,
+            &EMPTY_CONTINUATION_HISTORY,
+            None,
+            ply,
+        )
+    }
+
+    /// Create a new move orderer, additionally scoring quiet moves with
+    /// continuation history (how good `mv` has historically been as a reply
+    /// to `previous_move`).
+    ///
+    /// # Arguments
+    /// * `board` - The current position
+    /// * `moves` - Legal moves to order
+    /// * `hash_move` - Best move from transposition table (if any)
+    /// * `killers` - Killer move table reference
+    /// * `history` - History table reference
+    /// * `continuation_history` - Continuation history table reference
+    /// * `previous_move` - The opponent's previous move, if known
+    /// * `ply` - Current search ply
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_continuation_history(
+        board: &Board,
+        moves: Vec<Move>,
+        hash_move: Option<Move>,
+        killers: &'a KillerMoveTable,
+        history: &'a HistoryTable,
+        continuation_history: &'a ContinuationHistory,
+        previous_move: Option<Move>,
+        ply: u8,
+    ) -> Self {
         let mut orderer = Self {
             moves: moves.into_iter().map(|mv| ScoredMove::new(mv, 0)).collect(),
             current: 0,
             hash_move,
             killers,
             history,
+            continuation_history,
+            previous_move,
             ply,
         };
         orderer.score_moves(board);
+        // Sort once up front so `next()` is O(1) instead of doing a fresh
+        // linear scan for the max on every call (was O(n^2) per node via
+        // selection sort). Use a stable sort so ties (e.g. quiet moves with
+        // identical history score) keep natural move-generation order rather
+        // than an arbitrary unstable order.
+        orderer.moves.sort_by(|a, b| b.score.cmp(&a.score));
         orderer
     }
 
@@ -140,16 +193,28 @@ impl<'a> MoveOrderer<'a> {
                 }
             }
 
-            // Captures are scored by SEE or MVV-LVA.
-            if mv.captured.is_some() {
-                let see_score = see(board, mv);
-                if see_score >= 0 {
+            // Captures are scored by MVV-LVA; SEE is only invoked when the
+            // attacker is worth more than the victim, since those are the
+            // only captures that can plausibly lose material (avoids paying
+            // for a full SEE walk on every capture, which dominated node
+            // cost in profiling).
+            if let Some(victim) = mv.captured {
+                let attacker_value = SEE_PIECE_VALUES[mv.piece.piece_type as usize];
+                let victim_value = SEE_PIECE_VALUES[victim.piece_type as usize];
+
+                let see_score = if attacker_value > victim_value {
+                    Some(see(board, mv))
+                } else {
+                    None
+                };
+
+                if see_score.is_none_or(|s| s >= 0) {
                     // Good capture: base score + MVV-LVA for ordering among good captures.
                     scored_move.score =
-                        scores::GOOD_CAPTURE + mvv_lva_score(mv.piece.piece_type, mv.captured.unwrap().piece_type);
+                        scores::GOOD_CAPTURE + mvv_lva_score(mv.piece.piece_type, victim.piece_type);
                 } else {
                     // Bad capture: negative score.
-                    scored_move.score = scores::BAD_CAPTURE + see_score;
+                    scored_move.score = scores::BAD_CAPTURE + see_score.unwrap();
                 }
                 continue;
             }
@@ -170,34 +235,27 @@ impl<'a> MoveOrderer<'a> {
                 continue;
             }
 
-            // Quiet moves use history heuristic.
-            scored_move.score = scores::QUIET_BASE + self.history.get(color, mv);
+            // Quiet moves use history heuristic, plus continuation history
+            // (how good this move has been as a reply to the previous move).
+            // Both live on the same MAX_HISTORY_SCORE scale, so they're
+            // simply added together.
+            let continuation_score = match &self.previous_move {
+                Some(prev) => self.continuation_history.get(prev, mv),
+                None => 0,
+            };
+            scored_move.score = scores::QUIET_BASE + self.history.get(color, mv) + continuation_score;
         }
     }
 
-    /// Get the next best move using partial sorting.
+    /// Get the next best move.
     ///
-    /// Uses selection sort to find the best remaining move,
-    /// which is more efficient than full sorting when we expect
-    /// early cutoffs.
+    /// Moves are sorted by score once in `new()`, so this is just a linear
+    /// walk through the already-ordered list.
     pub fn next(&mut self) -> Option<Move> {
         if self.current >= self.moves.len() {
             return None;
         }
 
-        // Find the best move from current position onwards.
-        let mut best_idx = self.current;
-        let mut best_score = self.moves[self.current].score;
-
-        for i in (self.current + 1)..self.moves.len() {
-            if self.moves[i].score > best_score {
-                best_score = self.moves[i].score;
-                best_idx = i;
-            }
-        }
-
-        // Swap best move to current position.
-        self.moves.swap(self.current, best_idx);
         let mv = self.moves[self.current].mv;
         self.current += 1;
 

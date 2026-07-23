@@ -91,6 +91,29 @@ impl Board {
         self.side_to_move
     }
 
+    /// Get the most recently made move, if move history tracking is enabled
+    /// (see [`Board::enable_history`]) and at least one move has been made.
+    pub fn last_move(&self) -> Option<Move> {
+        self.move_history
+            .as_ref()
+            .and_then(|history| history.last())
+            .map(|(mv, _)| *mv)
+    }
+
+    /// Number of plies (half-moves) played so far in the game.
+    ///
+    /// Ply 0 is the starting position (white to move, fullmove 1).
+    /// Derived from the fullmove counter and side to move rather than
+    /// tracked separately, so it stays in sync with FEN parsing and
+    /// make/unmake without extra bookkeeping.
+    pub fn ply(&self) -> u32 {
+        let base = (self.fullmove_number.saturating_sub(1)) as u32 * 2;
+        match self.side_to_move {
+            Color::White => base,
+            Color::Black => base + 1,
+        }
+    }
+
     pub fn castling_rights(&self) -> CastlingRights {
         self.castling_rights
     }

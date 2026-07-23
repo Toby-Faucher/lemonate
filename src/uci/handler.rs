@@ -12,14 +12,24 @@ use super::protocol::{
 };
 
 use std::io::{self, BufRead, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread::JoinHandle;
 use std::time::Instant;
 
 /// UCI engine handler.
 pub struct UciEngine {
     /// Current board position.
     board: Board,
-    /// Search engine.
-    engine: SearchEngine,
+    /// Search engine. Taken out (`None`) while a search is running on the
+    /// background thread, and put back once that thread finishes.
+    engine: Option<SearchEngine>,
+    /// Handle to the search engine's stop flag, so `stop`/`quit` can signal
+    /// termination even while a search is running on another thread.
+    stop_flag: Arc<AtomicBool>,
+    /// The currently running search thread, if any. Sends the engine back
+    /// (with its state, e.g. transposition table) once the search finishes.
+    search_thread: Option<JoinHandle<SearchEngine>>,
     /// Debug mode.
     debug: bool,
 }
@@ -30,10 +40,25 @@ impl UciEngine {
         let mut board = Board::starting_position();
         board.enable_history();
 
+        let engine = SearchEngine::new();
+        let stop_flag = engine.stop_handle();
+
         Self {
             board,
-            engine: SearchEngine::new(),
+            engine: Some(engine),
+            stop_flag,
+            search_thread: None,
             debug: false,
+        }
+    }
+
+    /// Block until any in-progress search thread finishes, reclaiming the
+    /// search engine. No-op if no search is running.
+    fn join_search_thread(&mut self) {
+        if let Some(handle) = self.search_thread.take() {
+            if let Ok(engine) = handle.join() {
+                self.engine = Some(engine);
+            }
         }
     }
 
@@ -56,12 +81,25 @@ impl UciEngine {
                 UciCommand::IsReady => self.handle_isready(&mut stdout),
                 UciCommand::SetOption { name, value } => self.handle_setoption(&name, value),
                 UciCommand::Register => {} // Not implemented.
-                UciCommand::UciNewGame => self.handle_ucinewgame(),
-                UciCommand::Position { fen, moves } => self.handle_position(fen.as_deref(), &moves),
-                UciCommand::Go(params) => self.handle_go(params, &mut stdout),
-                UciCommand::Stop => {} // Stop is handled within search.
+                UciCommand::UciNewGame => {
+                    self.join_search_thread();
+                    self.handle_ucinewgame();
+                }
+                UciCommand::Position { fen, moves } => {
+                    self.join_search_thread();
+                    self.handle_position(fen.as_deref(), &moves);
+                }
+                UciCommand::Go(params) => self.handle_go(params),
+                UciCommand::Stop => {
+                    self.stop_flag.store(true, Ordering::Relaxed);
+                    self.join_search_thread();
+                }
                 UciCommand::PonderHit => {} // Not implemented.
-                UciCommand::Quit => break,
+                UciCommand::Quit => {
+                    self.stop_flag.store(true, Ordering::Relaxed);
+                    self.join_search_thread();
+                    break;
+                }
                 UciCommand::Unknown(cmd) => {
                     if self.debug && !cmd.is_empty() {
                         eprintln!("Unknown command: {}", cmd);
@@ -89,7 +127,9 @@ impl UciEngine {
             "hash" => {
                 if let Some(v) = value {
                     if let Ok(size_mb) = v.parse::<usize>() {
-                        self.engine.set_hash_size(size_mb);
+                        if let Some(engine) = self.engine.as_mut() {
+                            engine.set_hash_size(size_mb);
+                        }
                     }
                 }
             }
@@ -103,7 +143,9 @@ impl UciEngine {
 
     /// Handle "ucinewgame" command.
     fn handle_ucinewgame(&mut self) {
-        self.engine.new_game();
+        if let Some(engine) = self.engine.as_mut() {
+            engine.new_game();
+        }
         self.board = Board::starting_position();
         self.board.enable_history();
     }
@@ -138,25 +180,41 @@ impl UciEngine {
     }
 
     /// Handle "go" command.
-    fn handle_go(&mut self, params: GoParams, stdout: &mut io::Stdout) {
+    ///
+    /// Runs the search on a background thread so the main loop stays free
+    /// to read stdin and react to "stop"/"isready"/"quit" while it's going,
+    /// since "go infinite" and long game-clock searches would otherwise
+    /// block the loop and make "stop" unresponsive.
+    fn handle_go(&mut self, params: GoParams) {
+        // Should not normally happen (GUIs send "stop" before a new "go"),
+        // but guard against a stray previous search still owning the engine.
+        self.join_search_thread();
+
+        let Some(mut engine) = self.engine.take() else {
+            return;
+        };
+
         let limits = self.go_params_to_limits(&params);
-        let start = Instant::now();
+        let board = self.board.clone();
 
-        let result = self.engine.search(&self.board, limits);
-        let elapsed_ms = start.elapsed().as_millis();
+        self.search_thread = Some(std::thread::spawn(move || {
+            let start = Instant::now();
+            let result = engine.search(&board, limits);
+            let elapsed_ms = start.elapsed().as_millis();
 
-        // Output info string.
-        let _ = writeln!(stdout, "{}", format_info(&result, elapsed_ms));
+            let mut stdout = io::stdout();
+            let _ = writeln!(stdout, "{}", format_info(&result, elapsed_ms));
 
-        // Output bestmove.
-        if let Some(mv) = result.best_move {
-            let _ = writeln!(stdout, "{}", format_bestmove(&mv));
-        } else {
-            // No legal moves - output a placeholder.
-            let _ = writeln!(stdout, "bestmove 0000");
-        }
+            if let Some(mv) = result.best_move {
+                let _ = writeln!(stdout, "{}", format_bestmove(&mv));
+            } else {
+                // No legal moves - output a placeholder.
+                let _ = writeln!(stdout, "bestmove 0000");
+            }
 
-        let _ = stdout.flush();
+            let _ = stdout.flush();
+            engine
+        }));
     }
 
     /// Convert GoParams to SearchLimits.
@@ -203,6 +261,7 @@ impl UciEngine {
                 time,
                 increment.unwrap_or(0),
                 params.movestogo,
+                self.board.ply(),
             );
             if let Some(depth) = params.depth {
                 limits = limits.with_depth(depth);
