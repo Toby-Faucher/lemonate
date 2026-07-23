@@ -18,11 +18,16 @@ use crate::types::{Color, PieceType, Square};
 use crate::Board;
 use once_cell::sync::Lazy;
 
-use super::history::HistoryTable;
+use super::history::{ContinuationHistory, HistoryTable};
 use super::killer_moves::KillerMoveTable;
 
 /// Lazy-initialized attack table for SEE calculations.
 static ATTACK_TABLE: Lazy<AttackTable> = Lazy::new(AttackTable::new);
+
+/// Shared empty continuation history used by [`MoveOrderer::new`], which
+/// doesn't take a continuation history table (e.g. in tests or call sites
+/// that don't track the previous move).
+static EMPTY_CONTINUATION_HISTORY: Lazy<ContinuationHistory> = Lazy::new(ContinuationHistory::new);
 
 /// Score constants for move ordering.
 pub mod scores {
@@ -91,6 +96,10 @@ pub struct MoveOrderer<'a> {
     killers: &'a KillerMoveTable,
     /// Reference to history table.
     history: &'a HistoryTable,
+    /// Reference to continuation history table.
+    continuation_history: &'a ContinuationHistory,
+    /// The opponent's previous move, if known (absent at the root).
+    previous_move: Option<Move>,
     /// Current ply for killer move lookup.
     ply: u8,
 }
@@ -113,12 +122,50 @@ impl<'a> MoveOrderer<'a> {
         history: &'a HistoryTable,
         ply: u8,
     ) -> Self {
+        Self::with_continuation_history(
+            board,
+            moves,
+            hash_move,
+            killers,
+            history,
+            &EMPTY_CONTINUATION_HISTORY,
+            None,
+            ply,
+        )
+    }
+
+    /// Create a new move orderer, additionally scoring quiet moves with
+    /// continuation history (how good `mv` has historically been as a reply
+    /// to `previous_move`).
+    ///
+    /// # Arguments
+    /// * `board` - The current position
+    /// * `moves` - Legal moves to order
+    /// * `hash_move` - Best move from transposition table (if any)
+    /// * `killers` - Killer move table reference
+    /// * `history` - History table reference
+    /// * `continuation_history` - Continuation history table reference
+    /// * `previous_move` - The opponent's previous move, if known
+    /// * `ply` - Current search ply
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_continuation_history(
+        board: &Board,
+        moves: Vec<Move>,
+        hash_move: Option<Move>,
+        killers: &'a KillerMoveTable,
+        history: &'a HistoryTable,
+        continuation_history: &'a ContinuationHistory,
+        previous_move: Option<Move>,
+        ply: u8,
+    ) -> Self {
         let mut orderer = Self {
             moves: moves.into_iter().map(|mv| ScoredMove::new(mv, 0)).collect(),
             current: 0,
             hash_move,
             killers,
             history,
+            continuation_history,
+            previous_move,
             ply,
         };
         orderer.score_moves(board);
@@ -170,8 +217,15 @@ impl<'a> MoveOrderer<'a> {
                 continue;
             }
 
-            // Quiet moves use history heuristic.
-            scored_move.score = scores::QUIET_BASE + self.history.get(color, mv);
+            // Quiet moves use history heuristic, plus continuation history
+            // (how good this move has been as a reply to the previous move).
+            // Both live on the same MAX_HISTORY_SCORE scale, so they're
+            // simply added together.
+            let continuation_score = match &self.previous_move {
+                Some(prev) => self.continuation_history.get(prev, mv),
+                None => 0,
+            };
+            scored_move.score = scores::QUIET_BASE + self.history.get(color, mv) + continuation_score;
         }
     }
 

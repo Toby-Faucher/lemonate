@@ -32,7 +32,7 @@ mod move_ordering;
 mod time_manager;
 mod transposition;
 
-pub use history::{CounterMoveTable, HistoryTable};
+pub use history::{ContinuationHistory, CounterMoveTable, HistoryTable};
 pub use killer_moves::KillerMoveTable;
 pub use move_ordering::{is_good_capture, order_captures, MoveOrderer, ScoredMove};
 pub use time_manager::{SearchLimits, TimeControl, TimeManager};
@@ -159,6 +159,8 @@ pub struct SearchEngine {
     history: HistoryTable,
     /// Counter move table.
     counters: CounterMoveTable,
+    /// Continuation history (magnitude-scored "move B replies to move A").
+    continuation_history: ContinuationHistory,
     /// Position evaluator.
     evaluator: Evaluator,
     /// Time manager.
@@ -177,6 +179,7 @@ impl SearchEngine {
             killers: KillerMoveTable::new(),
             history: HistoryTable::new(),
             counters: CounterMoveTable::new(),
+            continuation_history: ContinuationHistory::new(),
             evaluator: Evaluator::new(),
             time_manager: TimeManager::default(),
             stats: SearchStats::default(),
@@ -198,6 +201,7 @@ impl SearchEngine {
         self.killers.clear();
         self.history.clear();
         self.counters.clear();
+        self.continuation_history.clear();
         self.stats.reset();
         self.pv_table.clear();
     }
@@ -213,11 +217,10 @@ impl SearchEngine {
         // Store max depth from limits.
         let max_depth = limits.max_depth;
 
-        // Age history table for fresh search.
-        self.history.age();
-
-        // Clear killers for new search.
-        self.killers.clear();
+        // NOTE: History and killer tables are intentionally NOT reset here.
+        // They should persist across searches within the same game so that
+        // move-ordering knowledge accumulated on earlier moves is retained.
+        // A full reset only happens in `new_game()`.
 
         // Increment TT age.
         self.tt.new_search();
@@ -435,13 +438,18 @@ impl SearchEngine {
             }
         }
 
+        // The opponent's previous move (if any), used for continuation history.
+        let previous_move = board.last_move();
+
         // Create move orderer and collect all moves in order.
-        let mut orderer = MoveOrderer::new(
+        let mut orderer = MoveOrderer::with_continuation_history(
             board,
             moves,
             hash_move,
             &self.killers,
             &self.history,
+            &self.continuation_history,
+            previous_move,
             ply,
         );
 
@@ -539,7 +547,14 @@ impl SearchEngine {
 
                         // Update heuristics for quiet moves.
                         if !is_capture {
-                            self.update_cutoff_heuristics(board, &mv, depth, ply, &quiets_tried);
+                            self.update_cutoff_heuristics(
+                                board,
+                                &mv,
+                                depth,
+                                ply,
+                                &quiets_tried,
+                                previous_move,
+                            );
                         }
 
                         // Store in TT with adjusted mate score.
@@ -782,6 +797,7 @@ impl SearchEngine {
         depth: i32,
         ply: u8,
         quiets_tried: &[Move],
+        previous_move: Option<Move>,
     ) {
         let color = board.side_to_move();
 
@@ -790,6 +806,18 @@ impl SearchEngine {
 
         // Update history heuristic.
         self.history.update(color, mv, quiets_tried, depth);
+
+        // Update continuation history: reward the cutoff move, penalize the
+        // quiet moves that were tried first and failed, both keyed on the
+        // opponent's previous move.
+        if let Some(prev) = previous_move {
+            self.continuation_history.update(&prev, mv, depth, true);
+            for failed in quiets_tried {
+                if failed != mv {
+                    self.continuation_history.update(&prev, failed, depth, false);
+                }
+            }
+        }
     }
 
     /// Extract principal variation from the transposition table.

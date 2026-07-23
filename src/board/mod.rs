@@ -91,6 +91,15 @@ impl Board {
         self.side_to_move
     }
 
+    /// Get the most recently made move, if move history tracking is enabled
+    /// (see [`Board::enable_history`]) and at least one move has been made.
+    pub fn last_move(&self) -> Option<Move> {
+        self.move_history
+            .as_ref()
+            .and_then(|history| history.last())
+            .map(|(mv, _)| *mv)
+    }
+
     pub fn castling_rights(&self) -> CastlingRights {
         self.castling_rights
     }
