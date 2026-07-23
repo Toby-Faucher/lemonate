@@ -261,6 +261,7 @@ impl UciEngine {
                 time,
                 increment.unwrap_or(0),
                 params.movestogo,
+                self.board.ply(),
             );
             if let Some(depth) = params.depth {
                 limits = limits.with_depth(depth);
