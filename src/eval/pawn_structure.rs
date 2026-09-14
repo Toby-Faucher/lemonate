@@ -109,17 +109,28 @@ impl PawnStructureEval {
     }
 
     pub fn evaluate_with_phase(&self, board: &Board, phase: i32) -> i32 {
+        self.evaluate_with_phase_and_weights(board, phase, &super::EvalWeights::DEFAULT)
+    }
+
+    pub fn evaluate_with_phase_and_weights(
+        &self,
+        board: &Board,
+        phase: i32,
+        weights: &super::EvalWeights,
+    ) -> i32 {
         let mut mg_score = 0;
         let mut eg_score = 0;
 
         let white_pawns = board.piece_bitboard(Color::White, crate::PieceType::Pawn);
         let black_pawns = board.piece_bitboard(Color::Black, crate::PieceType::Pawn);
 
-        let (w_mg, w_eg) = self.evaluate_pawns(white_pawns, black_pawns, Color::White);
+        let (w_mg, w_eg) =
+            self.evaluate_pawns_with_weights(white_pawns, black_pawns, Color::White, weights);
         mg_score += w_mg;
         eg_score += w_eg;
 
-        let (b_mg, b_eg) = self.evaluate_pawns(black_pawns, white_pawns, Color::Black);
+        let (b_mg, b_eg) =
+            self.evaluate_pawns_with_weights(black_pawns, white_pawns, Color::Black, weights);
         mg_score -= b_mg;
         eg_score -= b_eg;
 
@@ -131,6 +142,16 @@ impl PawnStructureEval {
         our_pawns: Bitboard,
         enemy_pawns: Bitboard,
         color: Color,
+    ) -> (i32, i32) {
+        self.evaluate_pawns_with_weights(our_pawns, enemy_pawns, color, &super::EvalWeights::DEFAULT)
+    }
+
+    fn evaluate_pawns_with_weights(
+        &self,
+        our_pawns: Bitboard,
+        enemy_pawns: Bitboard,
+        color: Color,
+        weights: &super::EvalWeights,
     ) -> (i32, i32) {
         let mut mg_score = 0;
         let mut eg_score = 0;
@@ -174,36 +195,36 @@ impl PawnStructureEval {
 
             //doubled pawn check
             if file_counts[file] > 1 {
-                mg_score += DOUBLED_PAWN_MG;
-                eg_score += DOUBLED_PAWN_EG;
+                mg_score += weights.doubled_pawn_mg;
+                eg_score += weights.doubled_pawn_eg;
             }
 
             //iso pawn check
             if !has_adjacent[file] {
-                mg_score += ISOLATED_PAWN_MG;
-                eg_score += ISOLATED_PAWN_EG;
+                mg_score += weights.isolated_pawn_mg;
+                eg_score += weights.isolated_pawn_eg;
             }
 
             //Passed pawn check
             if self.is_passed_pawn(sq, enemy_pawns, color) {
-                mg_score += PASSED_PAWN_MG[eval_rank];
-                eg_score += PASSED_PAWN_EG[eval_rank];
+                mg_score += weights.passed_pawn_mg[eval_rank];
+                eg_score += weights.passed_pawn_eg[eval_rank];
             }
 
             //Connected pawn check
             if self.is_connected_pawn(sq, our_pawns, color) {
-                mg_score += CONNECTED_PAWN_MG;
-                eg_score += CONNECTED_PAWN_EG;
+                mg_score += weights.connected_pawn_mg;
+                eg_score += weights.connected_pawn_eg;
             }
 
             //Backward pawn check
             if self.is_backward_pawn(sq, our_pawns, enemy_pawns, color) {
-                mg_score += BACKWARD_PAWN_MG;
-                eg_score += BACKWARD_PAWN_EG;
+                mg_score += weights.backward_pawn_mg;
+                eg_score += weights.backward_pawn_eg;
             }
         }
 
-        return (mg_score, eg_score);
+        (mg_score, eg_score)
     }
 
     fn is_passed_pawn(&self, sq: Square, enemy_pawns: Bitboard, color: Color) -> bool {
@@ -832,5 +853,44 @@ mod tests {
             eval.evaluate(&white_board),
             -eval.evaluate(&black_board)
         );
+    }
+
+    #[test]
+    fn weighted_default_matches_unweighted() {
+        use crate::eval::EvalWeights;
+
+        let board = Board::from_fen("8/4p3/8/8/4P3/8/4P3/8 w - - 0 1").unwrap();
+        let eval = PawnStructureEval::new();
+        let white_pawns = board.piece_bitboard(Color::White, crate::PieceType::Pawn);
+        let black_pawns = board.piece_bitboard(Color::Black, crate::PieceType::Pawn);
+
+        let default = eval.evaluate_pawns(white_pawns, black_pawns, Color::White);
+        let weighted = eval.evaluate_pawns_with_weights(
+            white_pawns,
+            black_pawns,
+            Color::White,
+            &EvalWeights::DEFAULT,
+        );
+
+        assert_eq!(default, weighted);
+    }
+
+    #[test]
+    fn known_fen_scores_unchanged() {
+        let cases = [
+            (
+                "r1bqkbnr/pppppppp/8/8/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 0 1",
+                -5,
+            ),
+            (
+                "r1bqk2r/pp1nbppp/2p2n2/3p4/3P4/2N1PN2/PPP1BPPP/R1BQK2R w KQ - 0 1",
+                5,
+            ),
+        ];
+        let eval = PawnStructureEval::new();
+        for (fen, expected) in cases {
+            let board = Board::from_fen(fen).unwrap();
+            assert_eq!(eval.evaluate(&board), expected, "mismatch for {}", fen);
+        }
     }
 }
