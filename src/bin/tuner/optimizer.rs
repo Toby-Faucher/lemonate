@@ -6,8 +6,36 @@ pub fn sigmoid(eval: f64, k: f64) -> f64 {
 }
 
 /// Mean squared error between `sigmoid(k * eval)` and each position's
-/// game result, scoring every position with `weights`.
+/// game result, scoring every position with `weights`. Splits the
+/// dataset across the available CPU cores using `std::thread::scope`
+/// (no external dependency) since this runs on every optimizer trial.
 pub fn mean_squared_error(positions: &[LabeledPosition], weights: &EvalWeights, k: f64) -> f64 {
+    if positions.is_empty() {
+        return 0.0;
+    }
+
+    let num_threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .min(positions.len());
+
+    if num_threads <= 1 {
+        return mean_squared_error_chunk(positions, weights, k) / positions.len() as f64;
+    }
+
+    let chunk_size = positions.len().div_ceil(num_threads);
+    let total: f64 = std::thread::scope(|scope| {
+        let handles: Vec<_> = positions
+            .chunks(chunk_size)
+            .map(|chunk| scope.spawn(|| mean_squared_error_chunk(chunk, weights, k)))
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).sum()
+    });
+
+    total / positions.len() as f64
+}
+
+fn mean_squared_error_chunk(positions: &[LabeledPosition], weights: &EvalWeights, k: f64) -> f64 {
     let evaluator = Evaluator::new();
     let mut total = 0.0;
     for pos in positions {
@@ -16,7 +44,7 @@ pub fn mean_squared_error(positions: &[LabeledPosition], weights: &EvalWeights, 
         let diff = pos.result - predicted;
         total += diff * diff;
     }
-    total / positions.len() as f64
+    total
 }
 
 /// Coarse-to-fine grid search for the sigmoid scaling constant `K`
@@ -166,5 +194,38 @@ mod tests {
 
         assert_eq!(final_error, initial_error);
         assert_eq!(tuned.to_vec(), EvalWeights::DEFAULT.to_vec());
+    }
+
+    #[test]
+    fn parallel_mse_matches_sequential_reference() {
+        let board = Board::starting_position();
+        let mut positions = Vec::new();
+        for i in 0..50 {
+            let result = match i % 3 {
+                0 => 1.0,
+                1 => 0.0,
+                _ => 0.5,
+            };
+            positions.push(LabeledPosition {
+                board: board.clone(),
+                result,
+            });
+        }
+
+        let evaluator = Evaluator::new();
+        let mut sequential_total = 0.0;
+        for pos in &positions {
+            let eval = evaluator.static_eval_white_pov(&pos.board, &EvalWeights::DEFAULT) as f64;
+            let predicted = sigmoid(eval, 1.0);
+            let diff = pos.result - predicted;
+            sequential_total += diff * diff;
+        }
+        let sequential_mse = sequential_total / positions.len() as f64;
+
+        let parallel_mse = mean_squared_error(&positions, &EvalWeights::DEFAULT, 1.0);
+        assert!(
+            (sequential_mse - parallel_mse).abs() < 1e-12,
+            "sequential {sequential_mse} vs parallel {parallel_mse}"
+        );
     }
 }
