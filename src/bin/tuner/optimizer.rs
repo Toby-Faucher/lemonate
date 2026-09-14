@@ -1,6 +1,88 @@
 use crate::dataset::LabeledPosition;
 use lemonate::{EvalWeights, Evaluator};
 
+/// Formats every tunable value in `weights` as ready-to-paste Rust
+/// `pub const` blocks, using the same names and shapes as the
+/// originals in `pst.rs`/`pawn_structure.rs`/`king_safety.rs`/
+/// `mobility.rs`.
+pub fn format_weights(weights: &EvalWeights) -> String {
+    let mut out = String::new();
+
+    let pst_tables: [(&str, &[i32; 64]); 12] = [
+        ("MG_PAWN_TABLE", &weights.pst_mg[0]),
+        ("MG_KNIGHT_TABLE", &weights.pst_mg[1]),
+        ("MG_BISHOP_TABLE", &weights.pst_mg[2]),
+        ("MG_ROOK_TABLE", &weights.pst_mg[3]),
+        ("MG_QUEEN_TABLE", &weights.pst_mg[4]),
+        ("MG_KING_TABLE", &weights.pst_mg[5]),
+        ("EG_PAWN_TABLE", &weights.pst_eg[0]),
+        ("EG_KNIGHT_TABLE", &weights.pst_eg[1]),
+        ("EG_BISHOP_TABLE", &weights.pst_eg[2]),
+        ("EG_ROOK_TABLE", &weights.pst_eg[3]),
+        ("EG_QUEEN_TABLE", &weights.pst_eg[4]),
+        ("EG_KING_TABLE", &weights.pst_eg[5]),
+    ];
+    for (name, table) in pst_tables {
+        out.push_str(&format_array(name, table));
+    }
+
+    out.push_str(&format_scalar("DOUBLED_PAWN_MG", weights.doubled_pawn_mg));
+    out.push_str(&format_scalar("DOUBLED_PAWN_EG", weights.doubled_pawn_eg));
+    out.push_str(&format_scalar("ISOLATED_PAWN_MG", weights.isolated_pawn_mg));
+    out.push_str(&format_scalar("ISOLATED_PAWN_EG", weights.isolated_pawn_eg));
+    out.push_str(&format_scalar("BACKWARD_PAWN_MG", weights.backward_pawn_mg));
+    out.push_str(&format_scalar("BACKWARD_PAWN_EG", weights.backward_pawn_eg));
+    out.push_str(&format_array("PASSED_PAWN_MG", &weights.passed_pawn_mg));
+    out.push_str(&format_array("PASSED_PAWN_EG", &weights.passed_pawn_eg));
+    out.push_str(&format_scalar("CONNECTED_PAWN_MG", weights.connected_pawn_mg));
+    out.push_str(&format_scalar("CONNECTED_PAWN_EG", weights.connected_pawn_eg));
+
+    out.push_str(&format_scalar("PAWN_SHIELD_CLOSE_MG", weights.pawn_shield_close_mg));
+    out.push_str(&format_scalar("PAWN_SHIELD_CLOSE_EG", weights.pawn_shield_close_eg));
+    out.push_str(&format_scalar("PAWN_SHIELD_FAR_MG", weights.pawn_shield_far_mg));
+    out.push_str(&format_scalar("PAWN_SHIELD_FAR_EG", weights.pawn_shield_far_eg));
+    out.push_str(&format_scalar(
+        "OPEN_FILE_NEAR_KING_MG",
+        weights.open_file_near_king_mg,
+    ));
+    out.push_str(&format_scalar(
+        "OPEN_FILE_NEAR_KING_EG",
+        weights.open_file_near_king_eg,
+    ));
+    out.push_str(&format_scalar(
+        "SEMI_OPEN_FILE_NEAR_KING_MG",
+        weights.semi_open_file_near_king_mg,
+    ));
+    out.push_str(&format_scalar(
+        "SEMI_OPEN_FILE_NEAR_KING_EG",
+        weights.semi_open_file_near_king_eg,
+    ));
+
+    out.push_str(&format_array("KNIGHT_MOBILITY_MG", &weights.knight_mobility_mg));
+    out.push_str(&format_array("KNIGHT_MOBILITY_EG", &weights.knight_mobility_eg));
+    out.push_str(&format_array("BISHOP_MOBILITY_MG", &weights.bishop_mobility_mg));
+    out.push_str(&format_array("BISHOP_MOBILITY_EG", &weights.bishop_mobility_eg));
+    out.push_str(&format_array("ROOK_MOBILITY_MG", &weights.rook_mobility_mg));
+    out.push_str(&format_array("ROOK_MOBILITY_EG", &weights.rook_mobility_eg));
+    out.push_str(&format_array("QUEEN_MOBILITY_MG", &weights.queen_mobility_mg));
+    out.push_str(&format_array("QUEEN_MOBILITY_EG", &weights.queen_mobility_eg));
+
+    out
+}
+
+fn format_scalar(name: &str, value: i32) -> String {
+    format!("pub const {name}: i32 = {value};\n")
+}
+
+fn format_array(name: &str, values: &[i32]) -> String {
+    let body = values
+        .iter()
+        .map(|v| v.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("pub const {name}: [i32; {}] = [{body}];\n", values.len())
+}
+
 pub fn sigmoid(eval: f64, k: f64) -> f64 {
     1.0 / (1.0 + 10f64.powf(-k * eval / 400.0))
 }
@@ -227,5 +309,36 @@ mod tests {
             (sequential_mse - parallel_mse).abs() < 1e-12,
             "sequential {sequential_mse} vs parallel {parallel_mse}"
         );
+    }
+
+    #[test]
+    fn format_weights_contains_all_const_names() {
+        let output = format_weights(&EvalWeights::DEFAULT);
+        for name in [
+            "MG_PAWN_TABLE",
+            "EG_KING_TABLE",
+            "DOUBLED_PAWN_MG",
+            "PASSED_PAWN_EG",
+            "PAWN_SHIELD_CLOSE_MG",
+            "SEMI_OPEN_FILE_NEAR_KING_EG",
+            "KNIGHT_MOBILITY_MG",
+            "QUEEN_MOBILITY_EG",
+        ] {
+            assert!(output.contains(name), "missing {name} in output:\n{output}");
+        }
+    }
+
+    #[test]
+    fn format_weights_has_expected_line_count() {
+        // 12 PST arrays + 10 pawn-structure consts + 8 king-safety
+        // scalars + 8 mobility arrays = 38 lines.
+        let output = format_weights(&EvalWeights::DEFAULT);
+        assert_eq!(output.lines().count(), 38);
+    }
+
+    #[test]
+    fn format_array_round_trips_through_rust_syntax() {
+        let formatted = format_array("TEST_ARRAY", &[1, -2, 3]);
+        assert_eq!(formatted, "pub const TEST_ARRAY: [i32; 3] = [1, -2, 3];\n");
     }
 }
