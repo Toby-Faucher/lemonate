@@ -7,7 +7,7 @@ use crate::types::{Color, Piece, PieceType, Square};
 use crate::Bitboard;
 
 /// Stores all reversible board state that needs to be saved before making a move
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct BoardState {
     /// Castling rights before the move
     pub castling_rights: CastlingRights,
@@ -72,6 +72,32 @@ impl Board {
         self.position_hash = state.position_hash;
 
         true
+    }
+
+    /// Execute a move without legality checking, returning the undo state.
+    ///
+    /// For search use only: the move must be legal for the current position.
+    /// Pair every call with [`Board::undo_move`]. Unlike [`Board::make_move`],
+    /// this never touches the move history and performs no allocation.
+    pub fn do_move(&mut self, mv: Move) -> BoardState {
+        let state = BoardState {
+            castling_rights: self.castling_rights,
+            en_passant_square: self.en_passant_square,
+            halfmove_clock: self.halfmove_clock,
+            position_hash: self.position_hash,
+            captured_piece: mv.captured,
+        };
+        self.execute_move(mv);
+        state
+    }
+
+    /// Undo a move previously applied with [`Board::do_move`].
+    pub fn undo_move(&mut self, mv: Move, state: BoardState) {
+        self.reverse_move(mv, &state);
+        self.castling_rights = state.castling_rights;
+        self.en_passant_square = state.en_passant_square;
+        self.halfmove_clock = state.halfmove_clock;
+        self.position_hash = state.position_hash;
     }
 
     /// Execute a move, updating board state and hash (internal use only)
@@ -332,7 +358,7 @@ impl Board {
     }
 
     /// Get hash for current castling rights
-    fn castling_rights_hash(&self) -> u64 {
+    pub(crate) fn castling_rights_hash(&self) -> u64 {
         let mut bits = 0u8;
         if self.castling_rights.white_kingside {
             bits |= 1 << 0;
@@ -364,8 +390,10 @@ impl Board {
     /// # Important
     /// This is NOT a legal chess move - only use for search purposes.
     pub fn make_null_move(&mut self) {
-        // Save en passant square for restoration
-        self.null_move_saved_ep = self.en_passant_square;
+        // Save en passant square for restoration (stack supports nesting).
+        debug_assert!(self.null_move_ep_len < 130);
+        self.null_move_ep_stack[self.null_move_ep_len as usize] = self.en_passant_square;
+        self.null_move_ep_len += 1;
 
         // XOR out old en passant from hash
         if let Some(old_ep) = self.en_passant_square {
@@ -389,12 +417,19 @@ impl Board {
         self.side_to_move = self.side_to_move.opposite();
         self.position_hash ^= zobrist_side_to_move_hash();
 
-        // Restore en passant square and update hash
-        if let Some(saved_ep) = self.null_move_saved_ep {
+        // Restore en passant square and update hash.
+        // If the stack is empty (unbalanced unmake) or the saved value was
+        // None, EP correctly stays cleared.
+        let saved_ep = if self.null_move_ep_len > 0 {
+            self.null_move_ep_len -= 1;
+            self.null_move_ep_stack[self.null_move_ep_len as usize]
+        } else {
+            None
+        };
+        if let Some(saved_ep) = saved_ep {
             self.en_passant_square = Some(saved_ep);
             self.position_hash ^= zobrist_en_passant_hash(Some(saved_ep.file()));
         }
-        self.null_move_saved_ep = None;
     }
 }
 
@@ -432,5 +467,153 @@ mod tests {
     fn test_unmake_empty_history() {
         let mut board = Board::new();
         assert!(!board.unmake_move());
+    }
+
+    /// Snapshot every mutable field for full-fidelity comparison.
+    #[derive(Clone, Debug)]
+    struct FullState {
+        piece_bitboards: [[crate::Bitboard; 6]; 2],
+        color_bitboard: [crate::Bitboard; 2],
+        all_pieces: crate::Bitboard,
+        side_to_move: crate::Color,
+        castling_rights: (bool, bool, bool, bool),
+        en_passant_square: Option<crate::Square>,
+        halfmove_clock: u16,
+        fullmove_number: u16,
+        position_hash: u64,
+        mailbox: [Option<crate::Piece>; 64],
+    }
+
+    impl Board {
+        fn full_state(&self) -> FullState {
+            FullState {
+                piece_bitboards: self.piece_bitboards,
+                color_bitboard: self.color_bitboard,
+                all_pieces: self.all_pieces,
+                side_to_move: self.side_to_move,
+                castling_rights: (
+                    self.castling_rights.white_kingside,
+                    self.castling_rights.white_queenside,
+                    self.castling_rights.black_kingside,
+                    self.castling_rights.black_queenside,
+                ),
+                en_passant_square: self.en_passant_square,
+                halfmove_clock: self.halfmove_clock,
+                fullmove_number: self.fullmove_number,
+                position_hash: self.position_hash,
+                mailbox: self.mailbox,
+            }
+        }
+
+        fn assert_full_eq(&self, s: &FullState, ctx: &str) {
+            let cur = self.full_state();
+            assert_eq!(cur.piece_bitboards, s.piece_bitboards, "pieces {}", ctx);
+            assert_eq!(cur.color_bitboard, s.color_bitboard, "color {}", ctx);
+            assert_eq!(cur.all_pieces, s.all_pieces, "all {}", ctx);
+            assert_eq!(cur.side_to_move, s.side_to_move, "side {}", ctx);
+            assert_eq!(cur.castling_rights, s.castling_rights, "rights {}", ctx);
+            assert_eq!(cur.en_passant_square, s.en_passant_square, "ep {}", ctx);
+            assert_eq!(cur.halfmove_clock, s.halfmove_clock, "clock {}", ctx);
+            assert_eq!(cur.fullmove_number, s.fullmove_number, "fullmove {}", ctx);
+            assert_eq!(cur.position_hash, s.position_hash, "hash {}", ctx);
+            assert_eq!(cur.mailbox, s.mailbox, "mailbox {}", ctx);
+        }
+    }
+
+    /// Every legal move must do/undo back to bit-identical state
+    /// (pieces AND metadata — hash alone is restored by assignment and
+    /// would mask piece corruption).
+    #[test]
+    fn test_do_undo_full_fidelity() {
+        let fens = [
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "r3k2r/pppppppp/8/8/8/8/PPPPPPPP/R3K2R w KQkq - 0 1",
+            "r3k2r/pppppppp/8/8/8/8/PPPPPPPP/R3K2R b KQkq - 0 1",
+            "rnbqkbnr/ppp1pppp/8/3pP3/8/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 1",
+            "rnbqkbnr/ppp1pppp/8/8/3Pp3/8/PPPP1PPP/RNBQKBNR b KQkq d3 0 1",
+            "2k5/3rP3/8/8/8/8/8/4K3 w - - 0 1",
+            "4k3/8/8/8/8/8/3Rp3/4K3 b - - 0 1",
+            "4k3/8/8/2q5/4N3/8/8/4K3 w - - 0 1",
+            "r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 0 1",
+        ];
+        for fen in fens {
+            let mut board = Board::from_fen(fen).unwrap();
+            board.enable_history();
+            let before = board.full_state();
+            let moves = board.generate_legal_moves();
+            assert!(!moves.is_empty(), "no moves for {}", fen);
+            for mv in moves {
+                let st = board.do_move(mv);
+                board.undo_move(mv, st);
+                board.assert_full_eq(
+                    &before,
+                    &format!("drift for {:?} in {}", mv, fen),
+                );
+            }
+            board.assert_full_eq(&before, &format!("end {}", fen));
+        }
+    }
+
+    /// Simple deterministic PRNG for the walk test (xorshift64).
+    fn walk_next(state: &mut u64) -> u64 {
+        *state ^= *state << 13;
+        *state ^= *state >> 7;
+        *state ^= *state << 17;
+        *state
+    }
+
+    /// Deep random walks (both colors, all move types incl. Black castles,
+    /// EP captures and promotions): full-state equality after EVERY undo.
+    /// Catches sequence-dependent corruption single roundtrips miss.
+    #[test]
+    fn test_do_undo_walk_fidelity() {
+        // Castle-heavy, EP-rich and promotion-adjacent openings.
+        let starts = [
+            "r3k2r/pppppppp/8/8/8/8/PPPPPPPP/R3K2R w KQkq - 0 1",
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "4k3/8/8/8/8/8/8/R3K2R w KQkq - 0 1",
+        ];
+        for (si, fen) in starts.iter().enumerate() {
+            let mut rng = 0x9e3779b97f4a7c15u64 ^ (si as u64).wrapping_mul(0xbf58476d1ce4e5b9);
+            let mut board = Board::from_fen(fen).unwrap();
+            board.enable_history();
+            // Stack of states mirroring search usage; assert after EVERY undo.
+            let mut stack: Vec<(super::Move, BoardState, FullState)> = Vec::new();
+            for step in 0..400 {
+                let moves = board.generate_legal_moves();
+                if moves.is_empty() {
+                    break;
+                }
+                // Prefer special moves to stress them.
+                let mv = *moves
+                    .iter()
+                    .find(|m| {
+                        !matches!(
+                            m.move_type,
+                            super::MoveType::Normal | super::MoveType::Capture
+                        )
+                    })
+                    .unwrap_or(&moves[(walk_next(&mut rng) as usize) % moves.len()]);
+                let before = board.full_state();
+                let st = board.do_move(mv);
+                stack.push((mv, st, before));
+                // Randomly unwind 1-3 plies, asserting after every undo.
+                let unwind = 1 + (walk_next(&mut rng) % 3) as usize;
+                for _ in 0..unwind {
+                    if let Some((m, s, expect)) = stack.pop() {
+                        board.undo_move(m, s);
+                        board.assert_full_eq(
+                            &expect,
+                            &format!("walk {} step {} undo {:?}", fen, step, m),
+                        );
+                    }
+                }
+            }
+            // Unwind everything: must return to the exact start.
+            while let Some((m, s, expect)) = stack.pop() {
+                board.undo_move(m, s);
+                board.assert_full_eq(&expect, &format!("walk unwind {}", fen));
+            }
+        }
     }
 }

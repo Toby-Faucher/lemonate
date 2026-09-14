@@ -118,6 +118,7 @@ impl PieceSquareTableEval {
     }
 
     /// Get the PST value for a piece on a square (from White's perspective)
+    #[allow(dead_code)]
     fn get_piece_value(&self, piece_type: PieceType, square: u8, is_mg: bool) -> i32 {
         let table = if is_mg {
             self.mg_table[piece_type as usize]
@@ -130,6 +131,17 @@ impl PieceSquareTableEval {
 
     /// Evaluate the position using tapered evaluation
     pub fn evaluate(&self, board: &Board) -> i32 {
+        let phase = self.phase.calculate(board);
+        self.evaluate_with_phase(board, phase)
+    }
+
+    /// Evaluate the position with a pre-computed game phase.
+    ///
+    /// Skips the internal `phase.calculate` call so callers that already
+    /// know the phase (e.g. `Evaluator::evaluate`) can share one
+    /// calculation across all eval terms. Scores are bit-identical to
+    /// `evaluate` when passed `self.phase.calculate(board)`.
+    pub fn evaluate_with_phase(&self, board: &Board, phase: i32) -> i32 {
         let mut mg_score = 0;
         let mut eg_score = 0;
 
@@ -142,6 +154,8 @@ impl PieceSquareTableEval {
             PieceType::King,
         ] {
             let piece_idx = piece_type as usize;
+            let mg_table = self.mg_table[piece_idx];
+            let eg_table = self.eg_table[piece_idx];
 
             // White pieces
             let mut white_bb = board.piece_bitboard(Color::White, piece_type);
@@ -149,8 +163,8 @@ impl PieceSquareTableEval {
                 let square = white_bb.pop_lsb().unwrap().index() as u8;
                 mg_score += MG_VALUE[piece_idx];
                 eg_score += EG_VALUE[piece_idx];
-                mg_score += self.get_piece_value(piece_type, square, true);
-                eg_score += self.get_piece_value(piece_type, square, false);
+                mg_score += mg_table[square as usize];
+                eg_score += eg_table[square as usize];
             }
 
             // Black pieces (flip square vertically for Black's perspective)
@@ -160,13 +174,12 @@ impl PieceSquareTableEval {
                 let flipped_square = square ^ 56; // Flip rank
                 mg_score -= MG_VALUE[piece_idx];
                 eg_score -= EG_VALUE[piece_idx];
-                mg_score -= self.get_piece_value(piece_type, flipped_square, true);
-                eg_score -= self.get_piece_value(piece_type, flipped_square, false);
+                mg_score -= mg_table[flipped_square as usize];
+                eg_score -= eg_table[flipped_square as usize];
             }
         }
 
         // Tapered evaluation using the phase module
-        let phase = self.phase.calculate(board);
         self.phase.taper(mg_score, eg_score, phase)
     }
 }

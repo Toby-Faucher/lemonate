@@ -37,10 +37,13 @@ impl Evaluator {
     }
 
     pub fn evaluate(&self, board: &Board) -> i32 {
-        let pst_score = self.pst.evaluate(board);
-        let pawn_score = self.pawn_structure.evaluate(board);
-        let king_score = self.king_safety.evaluate(board);
-        let mobility_score = self.mobility.evaluate(board);
+        // Compute the game phase once and share it across all tapered
+        // eval terms.
+        let phase = self.phase.calculate(board);
+        let pst_score = self.pst.evaluate_with_phase(board, phase);
+        let pawn_score = self.pawn_structure.evaluate_with_phase(board, phase);
+        let king_score = self.king_safety.evaluate_with_phase(board, phase);
+        let mobility_score = self.mobility.evaluate_with_phase(board, phase);
         let score = pst_score + pawn_score + king_score + mobility_score;
 
         // Return score from side-to-move's perspective for negamax

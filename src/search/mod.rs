@@ -29,19 +29,22 @@
 mod history;
 mod killer_moves;
 mod move_ordering;
+mod smp;
 mod time_manager;
 mod transposition;
 
 pub use history::{CounterMoveTable, HistoryTable};
 pub use killer_moves::KillerMoveTable;
-pub use move_ordering::{is_good_capture, order_captures, MoveOrderer, ScoredMove};
+pub use move_ordering::{is_good_capture, order_captures_into, MoveOrderer, ScoredMove, MAX_MOVES};
+pub use smp::{parallel_search, MAX_THREADS};
 pub use time_manager::{SearchLimits, TimeControl, TimeManager};
-pub use transposition::{EntryType, TranspositionEntry, TranspositionTable};
+pub use transposition::{EntryType, SharedTT, TranspositionEntry, TranspositionTable};
 
 use crate::board::{Move, MoveType};
 use crate::eval::Evaluator;
 use crate::types::PieceType;
 use crate::Board;
+use std::sync::Arc;
 
 /// Mate score constant (high value indicating checkmate).
 pub const MATE_SCORE: i32 = 100_000;
@@ -62,11 +65,37 @@ pub const NULL_MOVE_MIN_DEPTH: i32 = 3;
 pub const LMR_FULL_DEPTH_MOVES: usize = 4;
 pub const LMR_REDUCTION_LIMIT: i32 = 3;
 
+/// Precomputed LMR table indexed by [depth][move_count].
+/// Generated from the same formula as the original floating-point version;
+/// see the `lmr_table_matches_formula` test.
+static LMR_TABLE: once_cell::sync::Lazy<[[i32; 256]; 129]> =
+    once_cell::sync::Lazy::new(|| {
+        let mut table = [[0i32; 256]; 129];
+        for depth in 0..129 {
+            for move_count in 0..256 {
+                let ln_depth = (depth as f64).ln();
+                let ln_move_count = (move_count as f64).ln();
+                let reduction = (ln_depth * ln_move_count / 2.0) as i32;
+                table[depth][move_count] = reduction.min(depth as i32 - 1).max(1);
+            }
+        }
+        table
+    });
+
 /// Futility pruning base margin (per depth).
 pub const FUTILITY_MARGIN_BASE: i32 = 150;
 
 /// Aspiration window initial size.
 pub const ASPIRATION_WINDOW: i32 = 50;
+
+/// Maximum ply tracked in the principal variation table.
+pub const PV_SIZE: usize = MAX_DEPTH as usize + 1;
+
+/// Check whether two moves share from/to/type (root restriction matching).
+#[inline]
+fn is_same_move(a: &Move, b: &Move) -> bool {
+    a.from == b.from && a.to == b.to && a.move_type == b.move_type
+}
 
 /// Check if a score is a mate score.
 #[inline]
@@ -153,6 +182,10 @@ impl Default for SearchResult {
 pub struct SearchEngine {
     /// Transposition table.
     tt: TranspositionTable,
+    /// Shared transposition table for Lazy SMP workers. When `Some`, all
+    /// TT probes/stores go here instead of `tt`, so the single-threaded
+    /// path (`None`) stays bit-identical to before.
+    shared: Option<Arc<SharedTT>>,
     /// Killer move table.
     killers: KillerMoveTable,
     /// History heuristic table.
@@ -165,8 +198,14 @@ pub struct SearchEngine {
     time_manager: TimeManager,
     /// Search statistics.
     stats: SearchStats,
-    /// Principal variation table.
-    pv_table: Vec<Vec<Move>>,
+    /// Principal variation table (triangular, fixed size, no allocation).
+    pv: [[Move; PV_SIZE]; PV_SIZE],
+    /// Valid prefix lengths per ply in `pv`.
+    pv_len: [u8; PV_SIZE],
+    /// Root move restriction from UCI `searchmoves` (None = all moves).
+    root_moves: Option<Vec<Move>>,
+    /// Per-ply reusable move buffers (capacity retained, no per-node alloc).
+    move_buffers: Vec<Vec<Move>>,
 }
 
 impl SearchEngine {
@@ -174,13 +213,17 @@ impl SearchEngine {
     pub fn new() -> Self {
         Self {
             tt: TranspositionTable::default(),
+            shared: None,
             killers: KillerMoveTable::new(),
             history: HistoryTable::new(),
             counters: CounterMoveTable::new(),
             evaluator: Evaluator::new(),
             time_manager: TimeManager::default(),
             stats: SearchStats::default(),
-            pv_table: Vec::new(),
+            pv: [[Move::NONE; PV_SIZE]; PV_SIZE],
+            pv_len: [0; PV_SIZE],
+            root_moves: None,
+            move_buffers: Vec::new(),
         }
     }
 
@@ -193,25 +236,91 @@ impl SearchEngine {
     }
 
     /// Clear all search state for a new game.
+    ///
+    /// Only the thread-local state (including the private TT) is cleared.
+    /// The shared SMP table, when present, is managed by the search
+    /// coordinator (cleared once per game, not once per worker).
     pub fn new_game(&mut self) {
         self.tt.clear();
         self.killers.clear();
         self.history.clear();
         self.counters.clear();
         self.stats.reset();
-        self.pv_table.clear();
+        self.pv_len = [0; PV_SIZE];
+        for buf in &mut self.move_buffers {
+            buf.clear();
+        }
+    }
+
+    /// Point this engine at a shared SMP transposition table. All TT
+    /// probes/stores then go to the shared table instead of the private
+    /// one. Set to `None` to restore single-threaded behavior.
+    pub fn set_shared_tt(&mut self, tt: Option<Arc<SharedTT>>) {
+        self.shared = tt;
+    }
+
+    /// Probe the active transposition table (shared when set, else private).
+    #[inline]
+    fn tt_probe(&self, hash: u64) -> Option<TranspositionEntry> {
+        if let Some(shared) = &self.shared {
+            shared.probe(hash)
+        } else {
+            self.tt.probe(hash).copied()
+        }
+    }
+
+    /// Store into the active transposition table (shared when set, else private).
+    #[inline]
+    fn tt_store(
+        &mut self,
+        hash: u64,
+        score: i32,
+        depth: u8,
+        entry_type: EntryType,
+        best_move: Option<Move>,
+    ) {
+        if let Some(shared) = &self.shared {
+            shared.store(hash, score, depth, entry_type, best_move);
+        } else {
+            self.tt.store(hash, score, depth, entry_type, best_move);
+        }
+    }
+
+    /// Bump the age of the active transposition table.
+    fn tt_new_search(&mut self) {
+        if let Some(shared) = &self.shared {
+            shared.new_search();
+        } else {
+            self.tt.new_search();
+        }
     }
 
     /// Search for the best move with the given limits.
     ///
     /// This is the main entry point for the search.
     pub fn search(&mut self, board: &Board, limits: SearchLimits) -> SearchResult {
+        self.search_from_depth(board, limits, 1)
+    }
+
+    /// Search starting iterative deepening at `start_depth` instead of 1.
+    ///
+    /// Used by Lazy SMP helpers: staggering starting depths diversifies
+    /// the workers. A `start_depth` of 1 behaves exactly like [`search`](Self::search).
+    pub fn search_from_depth(
+        &mut self,
+        board: &Board,
+        limits: SearchLimits,
+        start_depth: u8,
+    ) -> SearchResult {
         // Create and start time manager.
         self.time_manager = TimeManager::new(&limits);
         self.time_manager.start();
 
         // Store max depth from limits.
         let max_depth = limits.max_depth;
+
+        // Store root move restriction (UCI searchmoves).
+        self.root_moves = limits.root_moves.clone();
 
         // Age history table for fresh search.
         self.history.age();
@@ -220,27 +329,71 @@ impl SearchEngine {
         self.killers.clear();
 
         // Increment TT age.
-        self.tt.new_search();
+        self.tt_new_search();
 
         // Reset statistics.
         self.stats.reset();
 
         // Run iterative deepening.
-        self.iterative_deepening(board, max_depth)
+        self.iterative_deepening(board, max_depth, start_depth)
+    }
+
+    /// Worker entry point for Lazy SMP searches sharing one table.
+    ///
+    /// Identical to [`search_from_depth`](Self::search_from_depth) except
+    /// it does NOT bump the shared table age — the coordinator bumps it
+    /// exactly once per search so replacement stays equivalent to the
+    /// single-threaded table.
+    pub(crate) fn search_worker(
+        &mut self,
+        board: &Board,
+        limits: SearchLimits,
+        start_depth: u8,
+    ) -> SearchResult {
+        // Create and start time manager.
+        self.time_manager = TimeManager::new(&limits);
+        self.time_manager.start();
+
+        // Store max depth from limits.
+        let max_depth = limits.max_depth;
+
+        // Store root move restriction (UCI searchmoves).
+        self.root_moves = limits.root_moves.clone();
+
+        // Age history table for fresh search.
+        self.history.age();
+
+        // Clear killers for new search.
+        self.killers.clear();
+
+        // NOTE: no tt_new_search() here — see doc comment above.
+
+        // Reset statistics.
+        self.stats.reset();
+
+        // Run iterative deepening.
+        self.iterative_deepening(board, max_depth, start_depth)
     }
 
     /// Iterative deepening search.
     ///
     /// Searches to increasing depths until time runs out.
     /// Each iteration uses results from previous iterations for move ordering.
-    fn iterative_deepening(&mut self, board: &Board, max_depth: Option<u8>) -> SearchResult {
+    fn iterative_deepening(
+        &mut self,
+        board: &Board,
+        max_depth: Option<u8>,
+        start_depth: u8,
+    ) -> SearchResult {
         let mut result = SearchResult::default();
         let mut board = board.clone();
         board.enable_history();
 
         let max_depth = max_depth.unwrap_or(MAX_DEPTH);
+        // Helpers with a stagger above the cap still search the cap.
+        let start_depth = start_depth.clamp(1, max_depth);
 
-        for depth in 1..=max_depth {
+        for depth in start_depth..=max_depth {
             // Check if we should stop before starting new iteration.
             if depth > 1 && !self.time_manager.can_start_iteration() {
                 break;
@@ -248,18 +401,17 @@ impl SearchEngine {
 
             self.stats.depth = depth;
 
-            // Initialize PV table for this depth.
-            self.pv_table = vec![Vec::new(); depth as usize + 1];
+            // Reset PV lengths for this iteration.
+            self.pv_len = [0; PV_SIZE];
 
             // Search at this depth.
             // TEMPORARILY DISABLED: Aspiration windows to debug queen blunder
             let (score, best_move) = {
                 // Full window search.
                 let score = self.negamax(&mut board, depth as i32, -INFINITY, INFINITY, 0);
-                let best_move = if !self.pv_table.is_empty() && !self.pv_table[0].is_empty() {
-                    Some(self.pv_table[0][0])
-                } else {
-                    self.get_hash_move(board.position_hash())
+                let best_move = match self.pv_first_move() {
+                    Some(mv) => Some(mv),
+                    None => self.get_hash_move(board.position_hash()),
                 };
                 (score, best_move)
             };
@@ -273,8 +425,8 @@ impl SearchEngine {
             result.score = score;
             result.depth = depth;
             result.best_move = best_move;
-            result.pv = if !self.pv_table.is_empty() {
-                self.pv_table[0].clone()
+            result.pv = if self.pv_len[0] > 0 {
+                self.pv[0][..self.pv_len[0] as usize].to_vec()
             } else {
                 self.extract_pv(&mut board, depth)
             };
@@ -303,10 +455,9 @@ impl SearchEngine {
 
             // Check for time out.
             if self.should_stop() {
-                let best_move = if !self.pv_table.is_empty() && !self.pv_table[0].is_empty() {
-                    Some(self.pv_table[0][0])
-                } else {
-                    self.get_hash_move(board.position_hash())
+                let best_move = match self.pv_first_move() {
+                    Some(mv) => Some(mv),
+                    None => self.get_hash_move(board.position_hash()),
                 };
                 return (score, best_move);
             }
@@ -322,10 +473,9 @@ impl SearchEngine {
                 delta *= 2;
             } else {
                 // Score is within window.
-                let best_move = if !self.pv_table.is_empty() && !self.pv_table[0].is_empty() {
-                    Some(self.pv_table[0][0])
-                } else {
-                    self.get_hash_move(board.position_hash())
+                let best_move = match self.pv_first_move() {
+                    Some(mv) => Some(mv),
+                    None => self.get_hash_move(board.position_hash()),
                 };
                 return (score, best_move);
             }
@@ -379,6 +529,13 @@ impl SearchEngine {
         }
 
         self.stats.nodes += 1;
+        self.time_manager.add_nodes(1);
+
+        // Enforce node limit exactly (the periodic check below can
+        // overshoot by up to 2047 nodes).
+        if self.time_manager.limit_reached() {
+            return 0;
+        }
 
         // Check for maximum ply.
         if ply >= MAX_DEPTH {
@@ -391,7 +548,7 @@ impl SearchEngine {
 
         // TT probing - get hash move and potentially cutoff
         let mut hash_move: Option<Move> = None;
-        if let Some(entry) = self.tt.probe(hash) {
+        if let Some(entry) = self.tt_probe(hash) {
             self.stats.tt_hits += 1;
             hash_move = entry.best_move;
 
@@ -405,18 +562,24 @@ impl SearchEngine {
             }
         }
 
-        // Generate legal moves.
-        let moves = board.generate_legal_moves();
+        // Generate legal moves into the per-ply reusable buffer.
+        if self.move_buffers.len() <= ply as usize {
+            self.move_buffers.resize_with(ply as usize + 1, Vec::new);
+        }
+        {
+            let buf = &mut self.move_buffers[ply as usize];
+            board.generate_legal_moves_into(buf);
 
-        // Check for checkmate or stalemate.
-        if moves.is_empty() {
-            return if board.is_in_check() {
-                // Checkmate - return negative mate score.
-                -MATE_SCORE + ply as i32
-            } else {
-                // Stalemate.
-                0
-            };
+            // Check for checkmate or stalemate.
+            if buf.is_empty() {
+                return if board.is_in_check() {
+                    // Checkmate - return negative mate score.
+                    -MATE_SCORE + ply as i32
+                } else {
+                    // Stalemate.
+                    0
+                };
+            }
         }
 
         // Static evaluation for pruning decisions.
@@ -435,27 +598,42 @@ impl SearchEngine {
             }
         }
 
-        // Create move orderer and collect all moves in order.
+        // Create move orderer over a stack buffer (no heap allocation).
+        // Killer moves are copied out so the loop can use &mut tables.
+        // The orderer copies the move list; all borrows end here.
+        let killer_moves = self.killers.get_killers(ply);
         let mut orderer = MoveOrderer::new(
             board,
-            moves,
+            &self.move_buffers[ply as usize],
             hash_move,
-            &self.killers,
+            killer_moves,
             &self.history,
-            ply,
         );
 
-        // Collect all moves in priority order to avoid borrow issues.
-        let mut ordered_moves = Vec::new();
-        while let Some(mv) = orderer.next() {
-            ordered_moves.push(mv);
-        }
-        drop(orderer); // Explicitly drop to release borrows.
+        // Enforce UCI `searchmoves` restriction at the root.
+        // Pre-scan (instead of filtering a collected Vec): if nothing legal
+        // matches, the restriction is ignored, as before. Cloned once per
+        // root call so the loop holds no borrow of `self`.
+        let restriction: Option<Vec<Move>> = if ply == 0 {
+            self.root_moves.clone()
+        } else {
+            None
+        };
+        let restriction_active = match &restriction {
+            Some(r) => self.move_buffers[ply as usize]
+                .iter()
+                .any(|mv| r.iter().any(|rm| is_same_move(rm, mv))),
+            None => false,
+        };
 
         let mut best_score = -INFINITY;
         let mut best_move = None;
         let mut move_count = 0;
-        let mut quiets_tried = Vec::new();
+        // Failed quiets for history updates (stack buffer). Sized at
+        // MAX_MOVES so the cap can never bind (legal moves <= 218):
+        // behavior is identical to the unbounded Vec.
+        let mut quiets_tried = [Move::NONE; MAX_MOVES];
+        let mut quiets_len = 0usize;
 
         // Futility pruning conditions
         let can_futility_prune = !is_pv
@@ -464,18 +642,33 @@ impl SearchEngine {
             && static_eval + self.futility_margin(depth) <= alpha;
 
         // Search moves.
-        for mv in ordered_moves {
+        while let Some(mv) = orderer.next(board) {
+            // Root restriction (pre-scanned above): skipped moves don't count.
+            if restriction_active {
+                let ok = match &restriction {
+                    Some(r) => r.iter().any(|rm| is_same_move(rm, &mv)),
+                    None => true,
+                };
+                if !ok {
+                    continue;
+                }
+            }
+
             move_count += 1;
             let is_capture = mv.captured.is_some();
             let is_tactical = self.is_tactical(&mv);
 
+            // Make the move (unchecked: it comes from this position's
+            // legal set, already validated during generation).
+            let undo = board.do_move(mv);
+
             // Futility pruning - skip quiet moves that can't raise alpha.
-            if can_futility_prune && move_count > 1 && !is_tactical {
+            // Never prune moves that give check: they are tactical even
+            // though is_tactical() can't see that before the move is made.
+            if can_futility_prune && move_count > 1 && !is_tactical && !board.is_in_check() {
+                board.undo_move(mv, undo);
                 continue;
             }
-
-            // Make the move.
-            board.make_move(mv);
 
             // Late move reductions
             let reduction = if move_count > LMR_FULL_DEPTH_MOVES
@@ -502,7 +695,7 @@ impl SearchEngine {
             }
 
             // Unmake the move.
-            board.unmake_move();
+            board.undo_move(mv, undo);
 
             // Check for time out.
             if self.should_stop() {
@@ -511,7 +704,11 @@ impl SearchEngine {
 
             // Track quiet moves for history updates.
             if !is_capture && score <= alpha {
-                quiets_tried.push(mv);
+                debug_assert!(quiets_len < quiets_tried.len());
+                if quiets_len < quiets_tried.len() {
+                    quiets_tried[quiets_len] = mv;
+                    quiets_len += 1;
+                }
             }
 
             // Update best score.
@@ -519,13 +716,20 @@ impl SearchEngine {
                 best_score = score;
                 best_move = Some(mv);
 
-                // Update PV.
-                if ply < self.pv_table.len() as u8 {
-                    self.pv_table[ply as usize].clear();
-                    self.pv_table[ply as usize].push(mv);
-                    if ply + 1 < self.pv_table.len() as u8 {
-                        let child_pv = self.pv_table[(ply + 1) as usize].clone();
-                        self.pv_table[ply as usize].extend(child_pv);
+                // Update PV (triangular fixed-size table, no allocation).
+                {
+                    let p = ply as usize;
+                    if p < PV_SIZE {
+                        self.pv[p][0] = mv;
+                        let mut len = 1usize;
+                        if p + 1 < PV_SIZE {
+                            let cl =
+                                (self.pv_len[p + 1] as usize).min(PV_SIZE - 1 - p);
+                            let (lo, hi) = self.pv.split_at_mut(p + 1);
+                            lo[p][1..1 + cl].copy_from_slice(&hi[0][..cl]);
+                            len += cl;
+                        }
+                        self.pv_len[p] = len as u8;
                     }
                 }
 
@@ -539,13 +743,19 @@ impl SearchEngine {
 
                         // Update heuristics for quiet moves.
                         if !is_capture {
-                            self.update_cutoff_heuristics(board, &mv, depth, ply, &quiets_tried);
+                            self.update_cutoff_heuristics(
+                                board,
+                                &mv,
+                                depth,
+                                ply,
+                                &quiets_tried[..quiets_len],
+                            );
                         }
 
                         // Store in TT with adjusted mate score.
                         let stored_score =
                             TranspositionTable::adjust_score_for_storage(score, ply);
-                        self.tt.store(
+                        self.tt_store(
                             hash,
                             stored_score,
                             depth as u8,
@@ -567,7 +777,7 @@ impl SearchEngine {
         };
 
         let stored_score = TranspositionTable::adjust_score_for_storage(best_score, ply);
-        self.tt.store(hash, stored_score, depth as u8, entry_type, best_move);
+        self.tt_store(hash, stored_score, depth as u8, entry_type, best_move);
 
         best_score
     }
@@ -593,6 +803,12 @@ impl SearchEngine {
         ply: u8,
     ) -> i32 {
         self.stats.qnodes += 1;
+        self.time_manager.add_nodes(1);
+
+        // Enforce node limit exactly.
+        if self.time_manager.limit_reached() {
+            return 0;
+        }
 
         // Update selective depth.
         if ply > self.stats.seldepth {
@@ -623,29 +839,59 @@ impl SearchEngine {
             }
         }
 
-        // Generate legal moves - only captures in quiescence (unless in check).
-        let moves = board.generate_legal_moves();
-
-        // If in check and no moves, it's checkmate.
-        if moves.is_empty() {
+        // Generate moves into the per-ply reusable buffer: full legal
+        // moves for check evasions, otherwise only tacticals (captures
+        // and promotions — exactly the set filtered before, but quiets
+        // skip legality tests entirely).
+        if self.move_buffers.len() <= ply as usize {
+            self.move_buffers.resize_with(ply as usize + 1, Vec::new);
+        }
+        {
+            let buf = &mut self.move_buffers[ply as usize];
             if in_check {
-                return -MATE_SCORE + ply as i32;
+                board.generate_legal_moves_into(buf);
+                // If in check and no moves, it's checkmate.
+                if buf.is_empty() {
+                    return -MATE_SCORE + ply as i32;
+                }
             } else {
-                return 0; // Stalemate
+                board.generate_legal_tacticals_into(buf);
+                // Empty tactical set: quiet position (stand pat below) or
+                // stalemate (no legal moves at all). The scan exits at the
+                // first legal quiet, so quiet positions stay cheap.
+                if buf.is_empty() && !board.has_legal_quiet(buf) {
+                    return 0; // Stalemate
+                }
             }
         }
 
-        // Filter to captures only (unless in check, then search all moves).
-        let captures: Vec<Move> = if in_check {
-            moves
-        } else {
-            moves.into_iter().filter(|m| m.captured.is_some()).collect()
+        // Order moves by MVV-LVA into a stack buffer, then iterate
+        // best-first with selection sort (early cutoffs skip the tail).
+        // The buffer already holds exactly the searched set (full evasions
+        // in check, tacticals otherwise), so no intermediate Vec remains.
+        let mut cap_buf = [ScoredMove::new(Move::NONE, 0); MAX_MOVES];
+        let n_caps = {
+            let buf = &self.move_buffers[ply as usize];
+            order_captures_into(buf, &mut cap_buf)
         };
-
-        // Order captures by MVV-LVA.
-        let ordered_captures = order_captures(captures);
-
-        for mv in ordered_captures {
+        let mut caps_done = 0;
+        while caps_done < n_caps {
+            // Selection-sort next best. Rotation (not swap) preserves the
+            // relative order of tied scores, exactly matching the previous
+            // stable full sort.
+            let mut best = caps_done;
+            for i in caps_done + 1..n_caps {
+                if cap_buf[i].score > cap_buf[best].score {
+                    best = i;
+                }
+            }
+            let sm = cap_buf[best];
+            for i in (caps_done..best).rev() {
+                cap_buf[i + 1] = cap_buf[i];
+            }
+            cap_buf[caps_done] = sm;
+            let mv = sm.mv;
+            caps_done += 1;
             // Delta pruning - skip captures that can't raise alpha.
             if !in_check && mv.captured.is_some() {
                 let captured_value = match mv.captured.unwrap().piece_type {
@@ -668,10 +914,10 @@ impl SearchEngine {
                 }
             }
 
-            // Make the move.
-            board.make_move(mv);
+            // Make the move (unchecked: from this position's legal set).
+            let undo = board.do_move(mv);
             let score = -self.quiescence(board, -beta, -alpha, ply + 1);
-            board.unmake_move();
+            board.undo_move(mv, undo);
 
             if score >= beta {
                 return beta;
@@ -750,15 +996,11 @@ impl SearchEngine {
     /// # Returns
     /// The reduction amount (0 if no reduction).
     fn late_move_reduction(&self, depth: i32, move_count: usize, _mv: &Move) -> i32 {
-        // Simple LMR formula.
-        // More aggressive reductions for later moves and higher depths.
-        let ln_depth = (depth as f64).ln();
-        let ln_move_count = (move_count as f64).ln();
-
-        let reduction = (ln_depth * ln_move_count / 2.0) as i32;
-
-        // Clamp reduction to not reduce too aggressively.
-        reduction.min(depth - 1).max(1)
+        // Table lookup with the identical formula (depth/move_count clamped
+        // to the table range; legal move counts never exceed 218).
+        let d = depth.clamp(0, 128) as usize;
+        let m = move_count.min(255);
+        LMR_TABLE[d][m]
     }
 
     /// Futility pruning margin.
@@ -795,19 +1037,23 @@ impl SearchEngine {
     /// Extract principal variation from the transposition table.
     fn extract_pv(&self, board: &mut Board, max_depth: u8) -> Vec<Move> {
         let mut pv = Vec::new();
-        let mut seen_hashes = std::collections::HashSet::new();
+        // Cycle guard without hashing overhead: depth-bounded linear scan
+        // (max 255 entries for u8 depth; almost always < 20 in practice).
+        let mut seen_hashes = [0u64; 256];
+        let mut n_seen = 0usize;
 
         for _ in 0..max_depth {
             let hash = board.position_hash();
 
             // Prevent infinite loops from hash collisions.
-            if seen_hashes.contains(&hash) {
+            if seen_hashes[..n_seen].contains(&hash) {
                 break;
             }
-            seen_hashes.insert(hash);
+            seen_hashes[n_seen] = hash;
+            n_seen += 1;
 
             // Get the best move from TT.
-            if let Some(entry) = self.tt.probe(hash) {
+            if let Some(entry) = self.tt_probe(hash) {
                 if let Some(mv) = entry.best_move {
                     // Verify move is legal.
                     let legal_moves = board.generate_legal_moves();
@@ -833,6 +1079,15 @@ impl SearchEngine {
         pv
     }
 
+    /// First move of the current principal variation, if any.
+    fn pv_first_move(&self) -> Option<Move> {
+        if self.pv_len[0] > 0 {
+            Some(self.pv[0][0])
+        } else {
+            None
+        }
+    }
+
     /// Check if we should stop searching.
     fn should_stop(&self) -> bool {
         self.time_manager.should_stop()
@@ -840,7 +1095,7 @@ impl SearchEngine {
 
     /// Get the hash move from the transposition table.
     fn get_hash_move(&self, hash: u64) -> Option<Move> {
-        self.tt.probe(hash).and_then(|e| e.best_move)
+        self.tt_probe(hash).and_then(|e| e.best_move)
     }
 
     /// Resize the transposition table.
@@ -1012,6 +1267,81 @@ mod tests {
         assert_eq!(mate_in(MATE_SCORE - 2), Some(1));
         assert_eq!(mate_in(MATE_SCORE - 4), Some(2));
         assert_eq!(mate_in(100), None);
+    }
+
+    #[test]
+    fn test_lmr_table_matches_formula() {
+        // Reference: the original floating-point formula.
+        fn reference(depth: i32, move_count: usize) -> i32 {
+            let ln_depth = (depth as f64).ln();
+            let ln_move_count = (move_count as f64).ln();
+            let reduction = (ln_depth * ln_move_count / 2.0) as i32;
+            reduction.min(depth - 1).max(1)
+        }
+
+        for depth in 0..=128i32 {
+            for move_count in [0usize, 1, 2, 4, 5, 10, 32, 100, 217, 218, 255] {
+                let d = depth.clamp(0, 128) as usize;
+                let m = move_count.min(255);
+                assert_eq!(
+                    LMR_TABLE[d][m],
+                    reference(depth, move_count),
+                    "LMR mismatch at depth={} moves={}",
+                    depth,
+                    move_count
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_quiescence_finds_quiet_promotion() {
+        // White pawn starts on e6, so no promotion exists at the root.
+        // At depth 2 (1.e7 <black reply>) quiescence runs with White to
+        // move and only quiescence can play the quiet promotion e8=Q.
+        // Stand pat there would be a few hundred centipawns at most;
+        // seeing the promotion gives ~1000.
+        let board = Board::from_fen("k7/8/4P3/8/8/8/8/4K3 w - - 0 1").unwrap();
+        let mut engine = SearchEngine::new();
+
+        let result = engine.search(&board, SearchLimits::depth(2));
+
+        assert!(
+            result.score > 800,
+            "Quiescence must see the quiet promotion, got {}",
+            result.score
+        );
+    }
+
+    #[test]
+    fn test_node_limit_respected() {
+        let board = Board::starting_position();
+        let mut engine = SearchEngine::new();
+
+        let result = engine.search(&board, SearchLimits::infinite().with_nodes(1000));
+
+        let total = result.stats.nodes + result.stats.qnodes;
+        assert!(
+            total <= 1000,
+            "Search must respect node limit, used {}",
+            total
+        );
+    }
+
+    #[test]
+    fn test_searchmoves_restriction() {
+        use crate::uci::parse_uci_move;
+
+        let board = Board::starting_position();
+        let legal = board.generate_legal_moves();
+        let only_e4 = parse_uci_move("e2e4", &legal).unwrap();
+        let mut engine = SearchEngine::new();
+
+        let result = engine.search(&board, SearchLimits::depth(3).with_root_moves(vec![only_e4]));
+        let best = result.best_move.expect("Should find a move");
+
+        assert_eq!(best.from, only_e4.from);
+        assert_eq!(best.to, only_e4.to);
     }
 
     #[test]

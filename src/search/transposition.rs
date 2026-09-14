@@ -12,6 +12,9 @@ use crate::board::Move;
 
 use super::MATE_SCORE;
 
+use std::cell::UnsafeCell;
+use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
+
 /// Default table size in megabytes.
 pub const DEFAULT_TABLE_SIZE_MB: usize = 64;
 
@@ -328,6 +331,256 @@ impl Default for TranspositionTable {
     }
 }
 
+/// One seqlock-protected slot of the shared table.
+///
+/// Readers take no lock: they snapshot `seq`, copy the payload, then
+/// re-check `seq`. Writers CAS `seq` from even to odd (brief per-entry
+/// exclusion), publish the payload, then mark it even again. A reader
+/// whose two `seq` samples differ (or saw an odd value) retries, so it
+/// can never observe a torn entry.
+struct SharedEntry {
+    seq: AtomicU32,
+    data: UnsafeCell<TranspositionEntry>,
+}
+
+// SAFETY: all payload access is mediated by the seqlock above;
+// `TranspositionEntry` itself is plain `Copy` data.
+unsafe impl Send for SharedEntry {}
+unsafe impl Sync for SharedEntry {}
+
+impl SharedEntry {
+    fn new() -> Self {
+        Self {
+            seq: AtomicU32::new(0),
+            data: UnsafeCell::new(TranspositionEntry::default()),
+        }
+    }
+
+    /// Optimistic read. Spins while a writer holds the slot and retries
+    /// on torn copies.
+    fn load(&self) -> TranspositionEntry {
+        loop {
+            let s1 = self.seq.load(Ordering::Acquire);
+            if s1 & 1 == 1 {
+                std::hint::spin_loop();
+                continue;
+            }
+            // SAFETY: `seq` is even, so no writer is publishing right now.
+            // If a writer starts mid-copy the trailing `seq` check fails
+            // and the (possibly torn) copy is discarded.
+            let copy: TranspositionEntry =
+                unsafe { std::ptr::read_volatile(self.data.get()) };
+            std::sync::atomic::fence(Ordering::Acquire);
+            let s2 = self.seq.load(Ordering::Acquire);
+            if s1 == s2 {
+                return copy;
+            }
+        }
+    }
+
+    /// Lock the slot for writing. Returns the locked sequence number to
+    /// pass to [`SharedEntry::unlock`]. Spins briefly on contention; only
+    /// writers racing on the *same index* wait here.
+    fn lock(&self) -> u32 {
+        loop {
+            let s = self.seq.load(Ordering::Acquire);
+            if s & 1 == 1 {
+                std::hint::spin_loop();
+                continue;
+            }
+            match self.seq.compare_exchange_weak(
+                s,
+                s.wrapping_add(1),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return s.wrapping_add(1),
+                Err(_) => {
+                    std::hint::spin_loop();
+                }
+            }
+        }
+    }
+
+    /// Publish a payload previously prepared while holding the lock.
+    /// Caller must have locked via [`SharedEntry::lock`].
+    unsafe fn publish(&self, locked: u32, entry: TranspositionEntry) {
+        // SAFETY: caller holds the slot exclusively (odd `seq` written by
+        // us); readers either spin or discard via the `seq` mismatch check.
+        unsafe { std::ptr::write_volatile(self.data.get(), entry) };
+        self.seq.store(locked.wrapping_add(1), Ordering::Release);
+    }
+
+    /// Release a lock taken via [`SharedEntry::lock`] without changing
+    /// the payload.
+    fn unlock(&self, locked: u32) {
+        self.seq.store(locked.wrapping_add(1), Ordering::Release);
+    }
+}
+
+/// Thread-safe transposition table for Lazy SMP search.
+///
+/// Entry layout and replacement policy are identical to
+/// [`TranspositionTable`]; only the synchronization differs (per-entry
+/// seqlock instead of `&mut` exclusivity). The table size is fixed at
+/// construction; resizing means building a new table (done while no
+/// search is running).
+pub struct SharedTT {
+    entries: Box<[SharedEntry]>,
+    mask: usize,
+    age: AtomicU8,
+}
+
+// SAFETY: `entries` is immutable after construction and each slot is
+// seqlock-synchronized; `age` is atomic.
+unsafe impl Send for SharedTT {}
+unsafe impl Sync for SharedTT {}
+
+impl SharedTT {
+    /// Create a new shared table with the given size in MB.
+    pub fn new(size_mb: usize) -> Self {
+        let entry_size = std::mem::size_of::<TranspositionEntry>();
+        let bytes = size_mb.saturating_mul(1024 * 1024);
+        let num_entries = (bytes / entry_size).max(MIN_TABLE_SIZE);
+
+        // Round down to power of 2 for efficient masking (same as
+        // `TranspositionTable::new`).
+        let size = num_entries.next_power_of_two() >> 1;
+        let size = size.max(MIN_TABLE_SIZE);
+
+        let mut entries = Vec::with_capacity(size);
+        for _ in 0..size {
+            entries.push(SharedEntry::new());
+        }
+
+        Self {
+            entries: entries.into_boxed_slice(),
+            mask: size - 1,
+            age: AtomicU8::new(0),
+        }
+    }
+
+    /// Clear all entries (call when no search is running).
+    pub fn clear(&self) {
+        for entry in self.entries.iter() {
+            let locked = entry.lock();
+            // SAFETY: slot locked for writing.
+            unsafe { entry.publish(locked, TranspositionEntry::default()) };
+        }
+        self.age.store(0, Ordering::Release);
+    }
+
+    /// Increment the age counter for a new search.
+    ///
+    /// Call exactly once per search (by the coordinator), not once per
+    /// worker, so shared replacement behaves like the single-threaded
+    /// table.
+    pub fn new_search(&self) {
+        self.age.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// Get the index for a given hash.
+    #[inline]
+    fn index(&self, hash: u64) -> usize {
+        (hash as usize) & self.mask
+    }
+
+    /// Probe the table, returning an owned copy of the entry on a full
+    /// hash match. Never returns torn data.
+    #[inline]
+    pub fn probe(&self, hash: u64) -> Option<TranspositionEntry> {
+        let index = self.index(hash);
+        let entry = self.entries[index].load();
+
+        if entry.hash == hash && !entry.is_empty() {
+            Some(entry)
+        } else {
+            None
+        }
+    }
+
+    /// Store a new entry, using the same depth-preferred replacement
+    /// with age consideration as [`TranspositionTable::store`].
+    pub fn store(
+        &self,
+        hash: u64,
+        score: i32,
+        depth: u8,
+        entry_type: EntryType,
+        best_move: Option<Move>,
+    ) {
+        let index = self.index(hash);
+        let slot = &self.entries[index];
+        let current_age = self.age.load(Ordering::Acquire);
+
+        let locked = slot.lock();
+        // Re-read under the lock: another worker may have stored a deeper
+        // entry after our last look.
+        // SAFETY: slot locked for writing.
+        let existing: TranspositionEntry =
+            unsafe { std::ptr::read_volatile(slot.data.get()) };
+
+        let should_replace = existing.is_empty()
+            || existing.hash != hash
+            || existing.age != current_age
+            || depth >= existing.depth;
+
+        if should_replace {
+            let best_move = if best_move.is_some() {
+                best_move
+            } else if existing.hash == hash {
+                existing.best_move
+            } else {
+                None
+            };
+
+            let entry =
+                TranspositionEntry::new(hash, score, depth, entry_type, best_move, current_age);
+            // SAFETY: slot locked for writing.
+            unsafe { slot.publish(locked, entry) };
+        } else {
+            slot.unlock(locked);
+        }
+    }
+
+    /// Get the hash table usage permille (0-1000), sampling the first
+    /// 1000 entries like [`TranspositionTable::hashfull`].
+    pub fn hashfull(&self) -> u16 {
+        let current_age = self.age.load(Ordering::Acquire);
+        let sample_size = 1000.min(self.entries.len());
+        let filled = self.entries[..sample_size]
+            .iter()
+            .filter(|e| {
+                let entry = e.load();
+                !entry.is_empty() && entry.age == current_age
+            })
+            .count();
+
+        ((filled * 1000) / sample_size) as u16
+    }
+
+    /// Get the number of entries in the table.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Check if the table is empty (no entries stored).
+    pub fn is_empty(&self) -> bool {
+        self.entries.iter().all(|e| e.load().is_empty())
+    }
+
+    /// Get the current age counter.
+    pub fn age(&self) -> u8 {
+        self.age.load(Ordering::Acquire)
+    }
+}
+
+impl Default for SharedTT {
+    fn default() -> Self {
+        Self::new(DEFAULT_TABLE_SIZE_MB)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -577,5 +830,144 @@ mod tests {
         let entry = tt.probe(hash).unwrap();
         assert!(entry.best_move.is_some());
         assert_eq!(entry.score, 150);
+    }
+
+    #[test]
+    fn test_shared_tt_single_thread_matches_local() {
+        // Same stores through the shared table must give the same visible
+        // results as the single-threaded table.
+        let shared = SharedTT::new(1);
+        let mut local = TranspositionTable::new(1);
+        let mv = make_test_move();
+
+        let stores = [
+            (0x123456789ABCDEF0u64, 100, 5, EntryType::Exact, Some(mv)),
+            (0x123456789ABCDEF0u64, 200, 2, EntryType::Exact, None), // shallower: kept
+            (0xFEDCBA9876543210u64, -50, 3, EntryType::LowerBound, None),
+            (0x0BADF00DDEADBEEFu64, 300, 8, EntryType::UpperBound, Some(mv)),
+        ];
+        for (hash, score, depth, ty, bm) in stores {
+            local.store(hash, score, depth, ty, bm);
+            shared.store(hash, score, depth, ty, bm);
+        }
+
+        for (hash, _, _, _, _) in stores {
+            match (local.probe(hash), shared.probe(hash)) {
+                (Some(l), Some(s)) => {
+                    assert_eq!(l.hash, s.hash);
+                    assert_eq!(l.score, s.score);
+                    assert_eq!(l.depth, s.depth);
+                    assert_eq!(l.entry_type, s.entry_type);
+                    assert_eq!(l.best_move, s.best_move);
+                }
+                (None, None) => {}
+                (l, s) => panic!("probe mismatch for {:x}: {:?} vs {:?}", hash, l, s),
+            }
+        }
+        assert!(shared.probe(0xDEADDEADDEADDEAD).is_none());
+    }
+
+    #[test]
+    fn test_shared_tt_concurrent_no_tear_same_entry() {
+        use std::sync::Arc;
+
+        // All writers publish byte-identical entries for one hash while
+        // readers probe it. Any torn copy would differ from the expected
+        // entry, so exact equality on every `Some` proves tear-free reads.
+        let shared = Arc::new(SharedTT::new(1));
+        let mv = make_test_move();
+        let hash: u64 = 0x123456789ABCDEF0;
+        shared.store(hash, 777, 9, EntryType::Exact, Some(mv));
+        let expected = shared.probe(hash).unwrap();
+
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let tt = Arc::clone(&shared);
+            handles.push(std::thread::spawn(move || {
+                for _ in 0..2000 {
+                    tt.store(hash, 777, 9, EntryType::Exact, Some(mv));
+                }
+            }));
+        }
+        for _ in 0..4 {
+            let tt = Arc::clone(&shared);
+            let exp = expected;
+            handles.push(std::thread::spawn(move || {
+                for _ in 0..4000 {
+                    if let Some(got) = tt.probe(hash) {
+                        assert_eq!(got.hash, exp.hash);
+                        assert_eq!(got.score, exp.score);
+                        assert_eq!(got.depth, exp.depth);
+                        assert_eq!(got.entry_type, exp.entry_type);
+                        assert_eq!(got.best_move, exp.best_move);
+                        assert_eq!(got.age, exp.age);
+                    }
+                }
+            }));
+        }
+        for h in handles {
+            h.join().expect("worker panicked");
+        }
+    }
+
+    #[test]
+    fn test_shared_tt_concurrent_distinct_hashes() {
+        use std::sync::Arc;
+
+        // Distinct hashes hammered from many threads: every probe must
+        // return either a miss or the exact entry for that hash — never a
+        // mix of two positions.
+        let shared = Arc::new(SharedTT::new(4));
+        let mut handles = Vec::new();
+        for t in 0..8u64 {
+            let tt = Arc::clone(&shared);
+            handles.push(std::thread::spawn(move || {
+                for i in 0..2000u64 {
+                    let hash = (t << 56) ^ (i.wrapping_mul(0x9E3779B97F4A7C15)) ^ 0x100;
+                    assert_ne!(hash, 0);
+                    let score = (hash ^ (hash >> 32)) as i32;
+                    tt.store(hash, score, (i % 16) as u8, EntryType::Exact, None);
+                    if let Some(entry) = tt.probe(hash) {
+                        // Either our entry survived or a colliding position
+                        // replaced it (probe verifies the full hash, so a
+                        // hit always belongs to `hash`).
+                        assert_eq!(entry.hash, hash);
+                        if entry.depth == (i % 16) as u8 {
+                            assert_eq!(entry.score, score);
+                        }
+                    }
+                    // Unrelated probes must never return a wrong entry.
+                    let other = hash ^ ((tt.len() as u64) << 3) ^ 0xFF;
+                    if let Some(entry) = tt.probe(other) {
+                        assert_eq!(entry.hash, other);
+                    }
+                }
+            }));
+        }
+        for h in handles {
+            h.join().expect("worker panicked");
+        }
+        // Table still fully usable afterwards.
+        shared.store(0xABCD, 42, 4, EntryType::Exact, None);
+        assert_eq!(shared.probe(0xABCD).unwrap().score, 42);
+    }
+
+    #[test]
+    fn test_shared_tt_age_and_clear() {
+        let shared = SharedTT::new(1);
+        let hash: u64 = 0x123456789ABCDEF0;
+
+        shared.store(hash, 100, 10, EntryType::Exact, None);
+        shared.new_search();
+        assert_eq!(shared.age(), 1);
+        // Old entry replaced regardless of depth after an age bump.
+        shared.store(hash, 200, 3, EntryType::Exact, None);
+        assert_eq!(shared.probe(hash).unwrap().score, 200);
+
+        assert!(!shared.is_empty());
+        shared.clear();
+        assert!(shared.is_empty());
+        assert_eq!(shared.age(), 0);
+        assert!(shared.probe(hash).is_none());
     }
 }

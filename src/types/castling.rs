@@ -1,6 +1,6 @@
 use crate::FenError;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CastlingRights {
     pub white_kingside: bool,
     pub white_queenside: bool,

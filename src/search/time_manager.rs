@@ -8,7 +8,13 @@
 //! - Support sudden death and increment time controls
 //! - Allow early termination when best move is stable
 
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::{Duration, Instant};
+
+use crate::board::Move;
 
 /// Default number of moves to assume remaining in sudden death.
 const DEFAULT_MOVES_TO_GO: u32 = 30;
@@ -54,6 +60,11 @@ pub struct SearchLimits {
     pub max_depth: Option<u8>,
     /// Maximum nodes to search (optional).
     pub max_nodes: Option<u64>,
+    /// Restrict the root search to these moves (UCI `searchmoves`, optional).
+    pub root_moves: Option<Vec<Move>>,
+    /// Shared stop flag allowing another thread to halt the search
+    /// (UCI `stop` command, optional).
+    pub stop_signal: Option<Arc<AtomicBool>>,
 }
 
 impl SearchLimits {
@@ -63,6 +74,8 @@ impl SearchLimits {
             time_control: TimeControl::FixedDepth(depth),
             max_depth: Some(depth),
             max_nodes: None,
+            root_moves: None,
+            stop_signal: None,
         }
     }
 
@@ -72,6 +85,8 @@ impl SearchLimits {
             time_control: TimeControl::FixedTime(Duration::from_millis(time_ms)),
             max_depth: None,
             max_nodes: None,
+            root_moves: None,
+            stop_signal: None,
         }
     }
 
@@ -81,6 +96,8 @@ impl SearchLimits {
             time_control: TimeControl::Infinite,
             max_depth: None,
             max_nodes: None,
+            root_moves: None,
+            stop_signal: None,
         }
     }
 
@@ -94,6 +111,8 @@ impl SearchLimits {
             },
             max_depth: None,
             max_nodes: None,
+            root_moves: None,
+            stop_signal: None,
         }
     }
 
@@ -106,6 +125,18 @@ impl SearchLimits {
     /// Add a depth limit to existing limits.
     pub fn with_depth(mut self, depth: u8) -> Self {
         self.max_depth = Some(depth);
+        self
+    }
+
+    /// Restrict the root search to the given moves.
+    pub fn with_root_moves(mut self, moves: Vec<Move>) -> Self {
+        self.root_moves = Some(moves);
+        self
+    }
+
+    /// Install a shared stop flag checked by the search.
+    pub fn with_stop_signal(mut self, signal: Arc<AtomicBool>) -> Self {
+        self.stop_signal = Some(signal);
         self
     }
 }
@@ -136,6 +167,8 @@ pub struct TimeManager {
     node_limit: Option<u64>,
     /// Whether time limits apply (false for depth/infinite).
     use_time_limit: bool,
+    /// Shared stop flag set by another thread (UCI `stop`).
+    stop_signal: Option<Arc<AtomicBool>>,
 }
 
 impl TimeManager {
@@ -177,6 +210,7 @@ impl TimeManager {
             nodes_searched: 0,
             node_limit: limits.max_nodes,
             use_time_limit,
+            stop_signal: limits.stop_signal.clone(),
         }
     }
 
@@ -197,6 +231,13 @@ impl TimeManager {
             return true;
         }
 
+        // Check shared stop signal from another thread.
+        if let Some(signal) = &self.stop_signal {
+            if signal.load(Ordering::Relaxed) {
+                return true;
+            }
+        }
+
         // Check node limit.
         if let Some(limit) = self.node_limit {
             if self.nodes_searched >= limit {
@@ -212,6 +253,17 @@ impl TimeManager {
         false
     }
 
+    /// Check if the node limit has been reached.
+    ///
+    /// Cheap (no clock read): safe to call on every node.
+    #[inline]
+    pub fn limit_reached(&self) -> bool {
+        match self.node_limit {
+            Some(limit) => self.nodes_searched >= limit,
+            None => false,
+        }
+    }
+
     /// Check if we can start another iteration of iterative deepening.
     ///
     /// Returns true if we have enough time for another iteration.
@@ -220,6 +272,12 @@ impl TimeManager {
     pub fn can_start_iteration(&self) -> bool {
         if self.stopped {
             return false;
+        }
+
+        if let Some(signal) = &self.stop_signal {
+            if signal.load(Ordering::Relaxed) {
+                return false;
+            }
         }
 
         if !self.use_time_limit {
@@ -233,6 +291,11 @@ impl TimeManager {
     /// Signal that the search should stop immediately.
     pub fn stop(&mut self) {
         self.stopped = true;
+    }
+
+    /// Install a shared stop flag checked by the search.
+    pub fn set_stop_signal(&mut self, signal: Arc<AtomicBool>) {
+        self.stop_signal = Some(signal);
     }
 
     /// Check if the search has been manually stopped.
@@ -380,6 +443,7 @@ impl Default for TimeManager {
             nodes_searched: 0,
             node_limit: None,
             use_time_limit: false,
+            stop_signal: None,
         }
     }
 }

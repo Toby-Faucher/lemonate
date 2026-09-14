@@ -50,7 +50,16 @@ impl MobilityEval {
 
     pub fn evaluate(&self, board: &Board) -> i32 {
         let phase = self.phase.calculate(board);
+        self.evaluate_with_phase(board, phase)
+    }
 
+    /// Evaluate mobility with a pre-computed game phase.
+    ///
+    /// Skips the internal `phase.calculate` call so callers that already
+    /// know the phase can share one calculation across all eval terms.
+    /// Scores are bit-identical to `evaluate` when passed
+    /// `self.phase.calculate(board)`.
+    pub fn evaluate_with_phase(&self, board: &Board, phase: i32) -> i32 {
         let (w_mg, w_eg) = self.evaluate_color(board, Color::White);
         let (b_mg, b_eg) = self.evaluate_color(board, Color::Black);
 
@@ -65,12 +74,19 @@ impl MobilityEval {
         let mut eg = 0;
 
         // Get friendly pieces to exclude from mobility count.
-        let friendly = board.piece_bitboard(color, PieceType::Pawn)
-            | board.piece_bitboard(color, PieceType::Knight)
-            | board.piece_bitboard(color, PieceType::Bishop)
-            | board.piece_bitboard(color, PieceType::Rook)
-            | board.piece_bitboard(color, PieceType::Queen)
-            | board.piece_bitboard(color, PieceType::King);
+        // `color_bitboard` is the maintained union of all six per-piece
+        // bitboards; the debug assertion below guards that invariant.
+        let friendly = board.color_bitboard(color);
+        debug_assert_eq!(
+            friendly,
+            board.piece_bitboard(color, PieceType::Pawn)
+                | board.piece_bitboard(color, PieceType::Knight)
+                | board.piece_bitboard(color, PieceType::Bishop)
+                | board.piece_bitboard(color, PieceType::Rook)
+                | board.piece_bitboard(color, PieceType::Queen)
+                | board.piece_bitboard(color, PieceType::King),
+            "color_bitboard must equal the union of per-piece bitboards"
+        );
 
         let blockers = board.all_pieces();
 
@@ -111,6 +127,9 @@ impl MobilityEval {
         let mut eg = 0;
 
         let mut knights = board.piece_bitboard(color, PieceType::Knight);
+        if knights.is_empty() {
+            return (0, 0);
+        }
         while knights.0 != 0 {
             let sq = knights.pop_lsb().unwrap();
             let attacks = ATTACK_TABLE.knight_attacks(sq);
@@ -136,6 +155,9 @@ impl MobilityEval {
         let mut eg = 0;
 
         let mut bishops = board.piece_bitboard(color, PieceType::Bishop);
+        if bishops.is_empty() {
+            return (0, 0);
+        }
         while bishops.0 != 0 {
             let sq = bishops.pop_lsb().unwrap();
             let attacks = ATTACK_TABLE.bishop_attacks(sq, blockers);
@@ -160,6 +182,9 @@ impl MobilityEval {
         let mut eg = 0;
 
         let mut rooks = board.piece_bitboard(color, PieceType::Rook);
+        if rooks.is_empty() {
+            return (0, 0);
+        }
         while rooks.0 != 0 {
             let sq = rooks.pop_lsb().unwrap();
             let attacks = ATTACK_TABLE.rook_attacks(sq, blockers);
@@ -184,6 +209,9 @@ impl MobilityEval {
         let mut eg = 0;
 
         let mut queens = board.piece_bitboard(color, PieceType::Queen);
+        if queens.is_empty() {
+            return (0, 0);
+        }
         while queens.0 != 0 {
             let sq = queens.pop_lsb().unwrap();
             let attacks = ATTACK_TABLE.queen_attacks(sq, blockers);
@@ -343,5 +371,36 @@ mod tests {
             "Trapped bishop should have poor mobility: {}",
             score
         );
+    }
+
+    #[test]
+    fn test_color_bitboard_equals_piece_union() {
+        // Debug-assertion backing: `color_bitboard` must equal the manual
+        // union of the six per-piece bitboards, so `evaluate_color` can
+        // use the cached aggregate.
+        let positions = [
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "r1bqkbnr/pppppppp/8/8/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 0 1",
+            "8/8/8/8/8/8/PPP5/1B2K2k w - - 0 1",
+            "8/8/8/8/8/4k3/8/4K3 w - - 0 1",
+        ];
+        for fen in positions {
+            let board = Board::from_fen(fen).unwrap();
+            for color in [Color::White, Color::Black] {
+                let manual = board.piece_bitboard(color, PieceType::Pawn)
+                    | board.piece_bitboard(color, PieceType::Knight)
+                    | board.piece_bitboard(color, PieceType::Bishop)
+                    | board.piece_bitboard(color, PieceType::Rook)
+                    | board.piece_bitboard(color, PieceType::Queen)
+                    | board.piece_bitboard(color, PieceType::King);
+                assert_eq!(
+                    board.color_bitboard(color),
+                    manual,
+                    "color_bitboard mismatch for {:?} in {}",
+                    color,
+                    fen
+                );
+            }
+        }
     }
 }

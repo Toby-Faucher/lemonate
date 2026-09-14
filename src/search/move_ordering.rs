@@ -19,7 +19,10 @@ use crate::Board;
 use once_cell::sync::Lazy;
 
 use super::history::HistoryTable;
-use super::killer_moves::KillerMoveTable;
+use super::killer_moves::KILLERS_PER_PLY;
+
+/// Maximum moves in any legal position (fixed buffer size).
+pub const MAX_MOVES: usize = 256;
 
 /// Lazy-initialized attack table for SEE calculations.
 static ATTACK_TABLE: Lazy<AttackTable> = Lazy::new(AttackTable::new);
@@ -71,98 +74,106 @@ pub const MVV_LVA: [[i32; 6]; 6] = [
 pub struct ScoredMove {
     pub mv: Move,
     pub score: i32,
+    /// True for captures whose SEE has not been computed yet.
+    /// `score` holds an upper bound (GOOD_CAPTURE + MVV-LVA) until then.
+    pub needs_see: bool,
 }
 
 impl ScoredMove {
     pub fn new(mv: Move, score: i32) -> Self {
-        Self { mv, score }
+        Self {
+            mv,
+            score,
+            needs_see: false,
+        }
     }
 }
 
 /// Move ordering context for a single node.
-pub struct MoveOrderer<'a> {
-    /// The list of moves to order.
-    moves: Vec<ScoredMove>,
+///
+/// Owns a fixed-size stack buffer — no heap allocation, and no borrow of
+/// the killer/history tables (killer moves are copied out at construction,
+/// history scores are folded into `score` eagerly), so the search loop can
+/// freely use `&mut` board and tables while iterating.
+pub struct MoveOrderer {
+    /// Scored moves (only `..len` entries are valid).
+    moves: [ScoredMove; MAX_MOVES],
+    /// Number of valid entries in `moves`.
+    len: usize,
     /// Current index in the move list.
     current: usize,
     /// Hash move to prioritize.
     hash_move: Option<Move>,
-    /// Reference to killer move table.
-    killers: &'a KillerMoveTable,
-    /// Reference to history table.
-    history: &'a HistoryTable,
-    /// Current ply for killer move lookup.
-    ply: u8,
+    /// Killer moves copied out for this ply.
+    killers: [Option<Move>; KILLERS_PER_PLY],
 }
 
-impl<'a> MoveOrderer<'a> {
+impl MoveOrderer {
     /// Create a new move orderer for the given position.
     ///
     /// # Arguments
     /// * `board` - The current position
     /// * `moves` - Legal moves to order
     /// * `hash_move` - Best move from transposition table (if any)
-    /// * `killers` - Killer move table reference
-    /// * `history` - History table reference
-    /// * `ply` - Current search ply
+    /// * `killers` - Killer moves for this ply (copied out, no borrow kept)
+    /// * `history` - History table reference (only borrowed during scoring)
     pub fn new(
         board: &Board,
-        moves: Vec<Move>,
+        moves: &[Move],
         hash_move: Option<Move>,
-        killers: &'a KillerMoveTable,
-        history: &'a HistoryTable,
-        ply: u8,
+        killers: [Option<Move>; KILLERS_PER_PLY],
+        history: &HistoryTable,
     ) -> Self {
+        debug_assert!(moves.len() <= MAX_MOVES);
         let mut orderer = Self {
-            moves: moves.into_iter().map(|mv| ScoredMove::new(mv, 0)).collect(),
+            moves: [ScoredMove::new(Move::NONE, 0); MAX_MOVES],
+            len: moves.len().min(MAX_MOVES),
             current: 0,
             hash_move,
             killers,
-            history,
-            ply,
         };
-        orderer.score_moves(board);
+        for (i, mv) in moves.iter().take(MAX_MOVES).enumerate() {
+            orderer.moves[i].mv = *mv;
+        }
+        orderer.score_moves(board, history);
         orderer
     }
 
     /// Score all moves for ordering.
-    fn score_moves(&mut self, board: &Board) {
+    fn score_moves(&mut self, board: &Board, history: &HistoryTable) {
         let color = board.side_to_move();
 
-        for scored_move in &mut self.moves {
-            let mv = &scored_move.mv;
+        for i in 0..self.len {
+            let mv = self.moves[i].mv;
 
             // Hash move gets highest priority.
             if let Some(hash_mv) = &self.hash_move {
-                if mv == hash_mv {
-                    scored_move.score = scores::HASH_MOVE;
+                if mv == *hash_mv {
+                    self.moves[i].score = scores::HASH_MOVE;
                     continue;
                 }
             }
 
             // Captures are scored by SEE or MVV-LVA.
+            // SEE is computed lazily in next(): the provisional score is an
+            // upper bound (all good captures keep it), so selection order is
+            // identical to eager scoring while most SEEs are never run.
             if mv.captured.is_some() {
-                let see_score = see(board, mv);
-                if see_score >= 0 {
-                    // Good capture: base score + MVV-LVA for ordering among good captures.
-                    scored_move.score =
-                        scores::GOOD_CAPTURE + mvv_lva_score(mv.piece.piece_type, mv.captured.unwrap().piece_type);
-                } else {
-                    // Bad capture: negative score.
-                    scored_move.score = scores::BAD_CAPTURE + see_score;
-                }
+                self.moves[i].score = scores::GOOD_CAPTURE
+                    + mvv_lva_score(mv.piece.piece_type, mv.captured.unwrap().piece_type);
+                self.moves[i].needs_see = true;
                 continue;
             }
 
             // Promotions are valuable.
             if let MoveType::Promotion(promo_type) = mv.move_type {
-                scored_move.score = scores::GOOD_CAPTURE + SEE_PIECE_VALUES[promo_type as usize];
+                self.moves[i].score = scores::GOOD_CAPTURE + SEE_PIECE_VALUES[promo_type as usize];
                 continue;
             }
 
             // Killer moves get priority for quiet moves.
-            if let Some(slot) = self.killers.is_killer(self.ply, mv) {
-                scored_move.score = if slot == 0 {
+            if let Some(slot) = killer_slot(&self.killers, &mv) {
+                self.moves[i].score = if slot == 0 {
                     scores::KILLER_PRIMARY
                 } else {
                     scores::KILLER_SECONDARY
@@ -171,7 +182,7 @@ impl<'a> MoveOrderer<'a> {
             }
 
             // Quiet moves use history heuristic.
-            scored_move.score = scores::QUIET_BASE + self.history.get(color, mv);
+            self.moves[i].score = scores::QUIET_BASE + history.get(color, &mv);
         }
     }
 
@@ -179,40 +190,71 @@ impl<'a> MoveOrderer<'a> {
     ///
     /// Uses selection sort to find the best remaining move,
     /// which is more efficient than full sorting when we expect
-    /// early cutoffs.
-    pub fn next(&mut self) -> Option<Move> {
-        if self.current >= self.moves.len() {
+    /// early cutoffs. Captures carry a provisional upper-bound score
+    /// until selected; their SEE is computed on first selection and the
+    /// scan repeats, yielding exactly the eager-scoring order.
+    pub fn next(&mut self, board: &Board) -> Option<Move> {
+        if self.current >= self.len {
             return None;
         }
 
-        // Find the best move from current position onwards.
-        let mut best_idx = self.current;
-        let mut best_score = self.moves[self.current].score;
+        loop {
+            // Find the best move from current position onwards.
+            let mut best_idx = self.current;
+            let mut best_score = self.moves[self.current].score;
 
-        for i in (self.current + 1)..self.moves.len() {
-            if self.moves[i].score > best_score {
-                best_score = self.moves[i].score;
-                best_idx = i;
+            for i in (self.current + 1)..self.len {
+                if self.moves[i].score > best_score {
+                    best_score = self.moves[i].score;
+                    best_idx = i;
+                }
             }
+
+            // Resolve a provisional capture score via SEE, then rescan.
+            if self.moves[best_idx].needs_see {
+                let mv = self.moves[best_idx].mv;
+                let see_score = see(board, &mv);
+                self.moves[best_idx].needs_see = false;
+                self.moves[best_idx].score = if see_score >= 0 {
+                    // Good capture: base score + MVV-LVA for ordering among good captures.
+                    scores::GOOD_CAPTURE
+                        + mvv_lva_score(mv.piece.piece_type, mv.captured.unwrap().piece_type)
+                } else {
+                    // Bad capture: negative score.
+                    scores::BAD_CAPTURE + see_score
+                };
+                continue;
+            }
+
+            // Swap best move to current position.
+            self.moves.swap(self.current, best_idx);
+            let mv = self.moves[self.current].mv;
+            self.current += 1;
+
+            return Some(mv);
         }
-
-        // Swap best move to current position.
-        self.moves.swap(self.current, best_idx);
-        let mv = self.moves[self.current].mv;
-        self.current += 1;
-
-        Some(mv)
     }
 
     /// Check if there are more moves to try.
     pub fn has_moves(&self) -> bool {
-        self.current < self.moves.len()
+        self.current < self.len
     }
 
     /// Get the number of remaining moves.
     pub fn remaining(&self) -> usize {
-        self.moves.len() - self.current
+        self.len - self.current
     }
+}
+
+/// Look up a move in a copied-out killer pair (same semantics as
+/// `KillerMoveTable::is_killer`: slot 0 is primary).
+fn killer_slot(killers: &[Option<Move>; KILLERS_PER_PLY], mv: &Move) -> Option<usize> {
+    for (slot, killer) in killers.iter().enumerate() {
+        if *killer == Some(*mv) {
+            return Some(slot);
+        }
+    }
+    None
 }
 
 /// Calculate MVV-LVA score for a capture.
@@ -383,35 +425,32 @@ pub fn is_good_capture(board: &Board, mv: &Move) -> bool {
     see(board, mv) >= 0
 }
 
-/// Order moves for quiescence search (captures only).
+/// Score captures for quiescence search into a stack buffer.
 ///
 /// Uses MVV-LVA ordering without killer/history heuristics.
-pub fn order_captures(captures: Vec<Move>) -> Vec<Move> {
-    let mut scored: Vec<ScoredMove> = captures
-        .into_iter()
-        .map(|mv| {
-            let score = if let Some(captured) = mv.captured {
-                mvv_lva_score(mv.piece.piece_type, captured.piece_type)
+/// Returns the number of valid entries. Same score formula as before;
+/// selection order is the caller's job (selection-sort like `MoveOrderer`).
+pub fn order_captures_into(captures: &[Move], buf: &mut [ScoredMove; MAX_MOVES]) -> usize {
+    let n = captures.len().min(MAX_MOVES);
+    for (i, mv) in captures.iter().take(MAX_MOVES).enumerate() {
+        let score = if let Some(captured) = mv.captured {
+            mvv_lva_score(mv.piece.piece_type, captured.piece_type)
+        } else {
+            // Promotions without captures.
+            if let MoveType::Promotion(promo_type) = mv.move_type {
+                SEE_PIECE_VALUES[promo_type as usize]
             } else {
-                // Promotions without captures.
-                if let MoveType::Promotion(promo_type) = mv.move_type {
-                    SEE_PIECE_VALUES[promo_type as usize]
-                } else {
-                    0
-                }
-            };
-            ScoredMove::new(mv, score)
-        })
-        .collect();
-
-    // Sort by score descending.
-    scored.sort_by(|a, b| b.score.cmp(&a.score));
-
-    scored.into_iter().map(|sm| sm.mv).collect()
+                0
+            }
+        };
+        buf[i] = ScoredMove::new(*mv, score);
+    }
+    n
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::killer_moves::KillerMoveTable;
     use super::*;
     use crate::board::MoveType;
     use crate::types::Piece;
@@ -495,10 +534,10 @@ mod tests {
         let moves = vec![mv1, mv2, mv3];
         let hash_move = Some(mv2);
 
-        let mut orderer = MoveOrderer::new(&board, moves, hash_move, &killers, &history, 0);
+        let mut orderer = MoveOrderer::new(&board, &moves, hash_move, killers.get_killers(0), &history);
 
         // Hash move should be returned first.
-        assert_eq!(orderer.next(), Some(mv2));
+        assert_eq!(orderer.next(&board), Some(mv2));
     }
 
     #[test]
@@ -515,10 +554,10 @@ mod tests {
         killers.store(5, quiet2);
 
         let moves = vec![quiet1, quiet2, quiet3];
-        let mut orderer = MoveOrderer::new(&board, moves, None, &killers, &history, 5);
+        let mut orderer = MoveOrderer::new(&board, &moves, None, killers.get_killers(5), &history);
 
         // Killer move should be returned first.
-        assert_eq!(orderer.next(), Some(quiet2));
+        assert_eq!(orderer.next(&board), Some(quiet2));
     }
 
     #[test]
@@ -542,20 +581,20 @@ mod tests {
         let mv2 = make_move("d2", "d4", PieceType::Pawn, Color::White);
 
         let moves = vec![mv1, mv2];
-        let mut orderer = MoveOrderer::new(&board, moves, None, &killers, &history, 0);
+        let mut orderer = MoveOrderer::new(&board, &moves, None, killers.get_killers(0), &history);
 
         assert!(orderer.has_moves());
         assert_eq!(orderer.remaining(), 2);
 
-        orderer.next();
+        orderer.next(&board);
         assert!(orderer.has_moves());
         assert_eq!(orderer.remaining(), 1);
 
-        orderer.next();
+        orderer.next(&board);
         assert!(!orderer.has_moves());
         assert_eq!(orderer.remaining(), 0);
 
-        assert_eq!(orderer.next(), None);
+        assert_eq!(orderer.next(&board), None);
     }
 
     #[test]
@@ -566,7 +605,23 @@ mod tests {
             make_capture("e4", "d5", PieceType::Pawn, PieceType::Queen, Color::White),
         ];
 
-        let ordered = order_captures(captures);
+        let mut buf = [ScoredMove::new(Move::NONE, 0); MAX_MOVES];
+        let n = order_captures_into(&captures, &mut buf);
+        assert_eq!(n, 3);
+        // Selection-sort into a Vec to check the resulting order.
+        let mut ordered = Vec::new();
+        let mut done = 0;
+        while done < n {
+            let mut best = done;
+            for i in done + 1..n {
+                if buf[i].score > buf[best].score {
+                    best = i;
+                }
+            }
+            buf.swap(done, best);
+            ordered.push(buf[done].mv);
+            done += 1;
+        }
 
         // PxQ should be first (score 505).
         assert_eq!(ordered[0].piece.piece_type, PieceType::Pawn);
@@ -661,10 +716,10 @@ mod tests {
         }
 
         let moves = vec![mv1, mv2, mv3];
-        let mut orderer = MoveOrderer::new(&board, moves, None, &killers, &history, 0);
+        let mut orderer = MoveOrderer::new(&board, &moves, None, killers.get_killers(0), &history);
 
         // mv3 should be first due to high history score.
-        assert_eq!(orderer.next(), Some(mv3));
+        assert_eq!(orderer.next(&board), Some(mv3));
     }
 
     // ==================== Mixed Priority Tests ====================
@@ -682,10 +737,10 @@ mod tests {
         killers.store(0, quiet);
 
         let moves = vec![quiet, capture];
-        let mut orderer = MoveOrderer::new(&board, moves, None, &killers, &history, 0);
+        let mut orderer = MoveOrderer::new(&board, &moves, None, killers.get_killers(0), &history);
 
         // Capture should be first.
-        assert_eq!(orderer.next(), Some(capture));
+        assert_eq!(orderer.next(&board), Some(capture));
     }
 
     #[test]
@@ -699,9 +754,9 @@ mod tests {
         let capture = make_capture("e4", "d5", PieceType::Pawn, PieceType::Rook, Color::White);
 
         let moves = vec![capture, quiet];
-        let mut orderer = MoveOrderer::new(&board, moves, Some(quiet), &killers, &history, 0);
+        let mut orderer = MoveOrderer::new(&board, &moves, Some(quiet), killers.get_killers(0), &history);
 
         // Hash move should be first.
-        assert_eq!(orderer.next(), Some(quiet));
+        assert_eq!(orderer.next(&board), Some(quiet));
     }
 }

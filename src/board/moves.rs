@@ -1,4 +1,4 @@
-use crate::{AttackTable, Board, Color, Piece, PieceType, Square};
+use crate::{AttackTable, Board, CastlingRights, Color, Piece, PieceType, Square};
 use once_cell::sync::Lazy;
 
 // Global static attack table - initialized once and shared across all boards
@@ -20,6 +20,27 @@ pub enum MoveType {
     EnPassant,
     Castle,
     Promotion(PieceType), // Queen, Rook, Bishop, Knight
+}
+
+impl Move {
+    /// Sentinel placeholder move (never a legal move).
+    /// Used to pre-fill fixed-size move buffers.
+    pub const NONE: Move = Move {
+        from: Square::from_index(0),
+        to: Square::from_index(0),
+        move_type: MoveType::Normal,
+        piece: Piece {
+            piece_type: PieceType::Pawn,
+            color: Color::White,
+        },
+        captured: None,
+    };
+
+    /// Tactical moves (captures and promotions) — the only moves searched
+    /// outside check evasion in quiescence.
+    pub const fn is_tactical(self) -> bool {
+        self.captured.is_some() || matches!(self.move_type, MoveType::Promotion(_))
+    }
 }
 
 impl Board {
@@ -53,6 +74,81 @@ impl Board {
             }
         }
         legal_moves
+    }
+
+    /// Generate legal moves into a caller-owned buffer (no allocation beyond
+    /// the buffer's own capacity). Uses make/unmake on `self` for the
+    /// legality test instead of cloning the board. The buffer is first used
+    /// as scratch for pseudo-legal moves, then compacted in place.
+    pub fn generate_legal_moves_into(&mut self, buf: &mut Vec<Move>) {
+        self.generate_pseudo_legal_moves_into(buf);
+
+        let mut w = 0;
+        for r in 0..buf.len() {
+            let mv = buf[r];
+            if self.is_legal_move_fast(mv) {
+                buf[w] = mv;
+                w += 1;
+            }
+        }
+        buf.truncate(w);
+    }
+
+    /// Generate legal tactical moves (captures and promotions) into a
+    /// caller-owned buffer. Exactly the set quiescence searches outside
+    /// check evasion, in the same order as filtering
+    /// [`Board::generate_legal_moves_into`]: pseudo-legal generation and
+    /// the legality test are per-move identical, but quiets skip the
+    /// legality test entirely.
+    pub fn generate_legal_tacticals_into(&mut self, buf: &mut Vec<Move>) {
+        self.generate_pseudo_legal_moves_into(buf);
+
+        let mut w = 0;
+        for r in 0..buf.len() {
+            let mv = buf[r];
+            if mv.is_tactical() && self.is_legal_move_fast(mv) {
+                buf[w] = mv;
+                w += 1;
+            }
+        }
+        buf.truncate(w);
+    }
+
+    /// True if any legal quiet (non-tactical) move exists.
+    ///
+    /// Early-exit scan reusing `buf` as scratch: stops at the first legal
+    /// quiet instead of testing all candidates. Used by quiescence to tell
+    /// a quiet position (stand pat) from stalemate (no legal moves at all).
+    pub fn has_legal_quiet(&mut self, buf: &mut Vec<Move>) -> bool {
+        self.generate_pseudo_legal_moves_into(buf);
+        for r in 0..buf.len() {
+            let mv = buf[r];
+            if !mv.is_tactical() && self.is_legal_move_fast(mv) {
+                buf.clear();
+                return true;
+            }
+        }
+        buf.clear();
+        false
+    }
+
+    /// Legality test via do/undo on `self` (no clone). Must agree exactly
+    /// with [`Board::is_legal_move`].
+    fn is_legal_move_fast(&mut self, mv: Move) -> bool {
+        let state = self.do_move(mv);
+
+        let our_color = mv.piece.color;
+        let king_bb = self.piece_bitboards[our_color as usize][PieceType::King as usize];
+
+        let ok = if king_bb.is_empty() {
+            false
+        } else {
+            let king_square = king_bb.into_iter().next().unwrap();
+            !self.is_square_attacked(king_square, our_color.opposite())
+        };
+
+        self.undo_move(mv, state);
+        ok
     }
 
     pub fn winner(&self) -> Option<Color> {
@@ -91,6 +187,13 @@ impl Board {
 
     pub fn generate_pseudo_legal_moves(&self) -> Vec<Move> {
         let mut moves = Vec::with_capacity(256);
+        self.generate_pseudo_legal_moves_into(&mut moves);
+        moves
+    }
+
+    /// Generate pseudo-legal moves into a caller-owned buffer.
+    pub fn generate_pseudo_legal_moves_into(&self, moves: &mut Vec<Move>) {
+        moves.clear();
         let color = self.side_to_move;
         let color_idx = color as usize;
 
@@ -106,16 +209,15 @@ impl Board {
 
             for square in piece_bb {
                 match piece_type {
-                    PieceType::Pawn => self.generate_pawn_moves(square, &mut moves),
-                    PieceType::Knight => self.generate_knight_moves(square, &mut moves),
-                    PieceType::Bishop => self.generate_bishop_moves(square, &mut moves),
-                    PieceType::Rook => self.generate_rook_moves(square, &mut moves),
-                    PieceType::Queen => self.generate_queen_moves(square, &mut moves),
-                    PieceType::King => self.generate_king_moves(square, &mut moves),
+                    PieceType::Pawn => self.generate_pawn_moves(square, &mut *moves),
+                    PieceType::Knight => self.generate_knight_moves(square, &mut *moves),
+                    PieceType::Bishop => self.generate_bishop_moves(square, &mut *moves),
+                    PieceType::Rook => self.generate_rook_moves(square, &mut *moves),
+                    PieceType::Queen => self.generate_queen_moves(square, &mut *moves),
+                    PieceType::King => self.generate_king_moves(square, &mut *moves),
                 }
             }
         }
-        moves
     }
 
     fn generate_knight_moves(&self, from: Square, moves: &mut Vec<Move>) {
@@ -302,10 +404,41 @@ impl Board {
             return;
         }
 
+        // Fast path: no rights at all (common case).
+        if self.castling_rights == CastlingRights::none() {
+            return;
+        }
+
+        // The king must be on its home square and the corresponding rook
+        // must be on its home square; otherwise the rights are stale
+        // (reachable only from an inconsistent FEN).
+        let (king_home, ks_rook_sq, qs_rook_sq) = match color {
+            Color::White => (
+                Square::from_coords(4, 0),
+                Square::from_coords(7, 0),
+                Square::from_coords(0, 0),
+            ),
+            Color::Black => (
+                Square::from_coords(4, 7),
+                Square::from_coords(7, 7),
+                Square::from_coords(0, 7),
+            ),
+        };
+        if from != king_home {
+            return;
+        }
+        let rook_home = |sq: Square| {
+            self.piece_at(sq)
+                == Some(Piece {
+                    piece_type: PieceType::Rook,
+                    color,
+                })
+        };
+
         match color {
             Color::White => {
                 // White kingside castling
-                if self.castling_rights.white_kingside() {
+                if self.castling_rights.white_kingside() && rook_home(ks_rook_sq) {
                     let f1 = Square::from_coords(5, 0);
                     let g1 = Square::from_coords(6, 0);
 
@@ -327,7 +460,7 @@ impl Board {
                 }
 
                 // White queenside castling
-                if self.castling_rights.white_queenside() {
+                if self.castling_rights.white_queenside() && rook_home(qs_rook_sq) {
                     let d1 = Square::from_coords(3, 0);
                     let c1 = Square::from_coords(2, 0);
                     let b1 = Square::from_coords(1, 0);
@@ -354,7 +487,7 @@ impl Board {
             }
             Color::Black => {
                 // Black kingside castling
-                if self.castling_rights.black_kingside() {
+                if self.castling_rights.black_kingside() && rook_home(ks_rook_sq) {
                     let f8 = Square::from_coords(5, 7);
                     let g8 = Square::from_coords(6, 7);
 
@@ -374,7 +507,7 @@ impl Board {
                 }
 
                 // Black queenside castling
-                if self.castling_rights.black_queenside() {
+                if self.castling_rights.black_queenside() && rook_home(qs_rook_sq) {
                     let d8 = Square::from_coords(3, 7);
                     let c8 = Square::from_coords(2, 7);
                     let b8 = Square::from_coords(1, 7);
@@ -541,19 +674,25 @@ impl Board {
             return true;
         }
 
-        // Check for bishop/queen attacks (diagonal)
-        let bishop_attacks = ATTACK_TABLE.bishop_attacks(square, self.all_pieces);
+        // Check for bishop/queen attacks (diagonal). Skip the magic
+        // lookup entirely when the enemy has no diagonal sliders.
         let enemy_bishops = self.piece_bitboards[by_color as usize][PieceType::Bishop as usize];
         let enemy_queens = self.piece_bitboards[by_color as usize][PieceType::Queen as usize];
-        if !(bishop_attacks & (enemy_bishops | enemy_queens)).is_empty() {
-            return true;
+        if !(enemy_bishops | enemy_queens).is_empty() {
+            let bishop_attacks = ATTACK_TABLE.bishop_attacks(square, self.all_pieces);
+            if !(bishop_attacks & (enemy_bishops | enemy_queens)).is_empty() {
+                return true;
+            }
         }
 
-        // Check for rook/queen attacks (straight)
-        let rook_attacks = ATTACK_TABLE.rook_attacks(square, self.all_pieces);
+        // Check for rook/queen attacks (straight). Skip the magic lookup
+        // entirely when the enemy has no straight sliders.
         let enemy_rooks = self.piece_bitboards[by_color as usize][PieceType::Rook as usize];
-        if !(rook_attacks & (enemy_rooks | enemy_queens)).is_empty() {
-            return true;
+        if !(enemy_rooks | enemy_queens).is_empty() {
+            let rook_attacks = ATTACK_TABLE.rook_attacks(square, self.all_pieces);
+            if !(rook_attacks & (enemy_rooks | enemy_queens)).is_empty() {
+                return true;
+            }
         }
 
         // Check for king attacks
@@ -666,6 +805,56 @@ impl Board {
                 piece_type: PieceType::Rook,
                 color,
             });
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tactical_key(mv: &Move) -> (usize, usize, String, Option<Piece>) {
+        (
+            mv.from.index(),
+            mv.to.index(),
+            format!("{:?}", mv.move_type),
+            mv.captured,
+        )
+    }
+
+    /// Tactical set must equal the tactical subset of full legal moves,
+    /// in the same order, on many positions (including promotions, EP,
+    /// checks and pins).
+    #[test]
+    fn test_tacticals_match_filtered_legals() {
+        let fens = [
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "r3k2r/pppppppp/8/8/8/8/PPPPPPPP/R3K2R w KQkq - 0 1",
+            "rnbqkbnr/ppp1pppp/8/3pP3/8/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 1",
+            "2k5/3rP3/8/8/8/8/8/4K3 w - - 0 1",
+            "4k3/8/8/2q5/4N3/8/8/4K3 w - - 0 1",
+            "r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 0 1",
+            "k7/8/4P3/8/8/8/8/4K3 w - - 0 1",
+            "r1bq1rk1/pp1pppbp/2n2np1/2p5/2P5/2N2NP1/PP1PPPBP/R1BQ1RK1 w - - 0 1",
+        ];
+        for fen in fens {
+            let mut board = Board::from_fen(fen).unwrap();
+            let full = board.generate_legal_moves();
+            let expected: Vec<_> = full
+                .iter()
+                .filter(|m| m.is_tactical())
+                .map(tactical_key)
+                .collect();
+
+            let mut buf = Vec::new();
+            board.generate_legal_tacticals_into(&mut buf);
+            let got: Vec<_> = buf.iter().map(tactical_key).collect();
+
+            assert_eq!(got, expected, "tactical mismatch in {}", fen);
+
+            // has_legal_quiet agrees with full-list quiet existence.
+            let any_quiet = full.iter().any(|m| !m.is_tactical());
+            assert_eq!(board.has_legal_quiet(&mut buf), any_quiet, "quiet probe in {}", fen);
         }
     }
 }

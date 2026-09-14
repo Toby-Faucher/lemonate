@@ -29,7 +29,16 @@ impl KingSafetyEval {
 
     pub fn evaluate(&self, board: &Board) -> i32 {
         let phase = self.phase.calculate(board);
+        self.evaluate_with_phase(board, phase)
+    }
 
+    /// Evaluate king safety with a pre-computed game phase.
+    ///
+    /// Skips the internal `phase.calculate` call so callers that already
+    /// know the phase can share one calculation across all eval terms.
+    /// Scores are bit-identical to `evaluate` when passed
+    /// `self.phase.calculate(board)`.
+    pub fn evaluate_with_phase(&self, board: &Board, phase: i32) -> i32 {
         let (w_mg, w_eg) = self.evaluate_king(board, Color::White);
         let (b_mg, b_eg) = self.evaluate_king(board, Color::Black);
 

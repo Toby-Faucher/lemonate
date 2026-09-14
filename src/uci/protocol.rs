@@ -264,6 +264,7 @@ pub fn format_uci_id() -> String {
     output.push_str("id author Toby\n");
     output.push_str("\n");
     output.push_str("option name Hash type spin default 64 min 1 max 4096\n");
+    output.push_str("option name Threads type spin default 1 min 1 max 256\n");
     output.push_str("\n");
     output.push_str("uciok");
     output
@@ -345,22 +346,31 @@ fn square_to_algebraic(square: Square) -> String {
 /// Returns None if the move string is invalid or not legal.
 pub fn parse_uci_move(s: &str, legal_moves: &[Move]) -> Option<Move> {
     let s = s.trim().to_lowercase();
+    let bytes = s.as_bytes();
 
-    if s.len() < 4 {
+    if bytes.len() < 4 {
         return None;
     }
 
-    let from_file = s.chars().nth(0)?.to_digit(36)? as u8 - 10; // 'a' = 10 in base 36
-    let from_rank = s.chars().nth(1)?.to_digit(10)? as u8 - 1;
-    let to_file = s.chars().nth(2)?.to_digit(36)? as u8 - 10;
-    let to_rank = s.chars().nth(3)?.to_digit(10)? as u8 - 1;
-
-    if from_file > 7 || from_rank > 7 || to_file > 7 || to_rank > 7 {
-        return None;
+    // Strict ranges: files a-h, ranks 1-8. Anything else returns None
+    // instead of panicking on arithmetic underflow.
+    fn file(c: u8) -> Option<u8> {
+        if (b'a'..=b'h').contains(&c) {
+            Some(c - b'a')
+        } else {
+            None
+        }
+    }
+    fn rank(c: u8) -> Option<u8> {
+        if (b'1'..=b'8').contains(&c) {
+            Some(c - b'1')
+        } else {
+            None
+        }
     }
 
-    let from = Square::from_coords(from_file, from_rank);
-    let to = Square::from_coords(to_file, to_rank);
+    let from = Square::from_coords(file(bytes[0])?, rank(bytes[1])?);
+    let to = Square::from_coords(file(bytes[2])?, rank(bytes[3])?);
 
     // Check for promotion.
     let promotion = if s.len() >= 5 {
@@ -498,5 +508,35 @@ mod tests {
         assert!(id.contains("id name Lemonate"));
         assert!(id.contains("id author Toby"));
         assert!(id.contains("uciok"));
+    }
+
+    #[test]
+    fn test_format_uci_id_advertises_threads() {
+        let id = format_uci_id();
+        assert!(
+            id.contains("option name Threads type spin default 1 min 1 max 256"),
+            "UCI id must advertise the Threads option, got:\n{}",
+            id
+        );
+        // Pre-existing options keep their exact format.
+        assert!(id.contains("option name Hash type spin default 64 min 1 max 4096"));
+    }
+
+    #[test]
+    fn test_parse_uci_move_malformed_no_panic() {
+        use crate::Board;
+        let board = Board::starting_position();
+        let legal = board.generate_legal_moves();
+
+        // Rank 0 / digit files previously caused arithmetic underflow.
+        for bad in ["e0e4", "e9e4", "1111", "xxxx", "e2", "", "i2i4", "e2e9"] {
+            assert!(
+                parse_uci_move(bad, &legal).is_none(),
+                "{:?} should not parse",
+                bad
+            );
+        }
+
+        assert!(parse_uci_move("e2e4", &legal).is_some());
     }
 }

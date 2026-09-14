@@ -34,8 +34,10 @@ pub struct Board {
     // Move history for make/unmake operations
     move_history: Option<Vec<(Move, BoardState)>>,
 
-    // Saved en passant square for null move restoration
-    null_move_saved_ep: Option<Square>,
+    // Saved en passant squares for null move restoration (fixed-size stack
+    // supporting nested null moves with zero heap allocation).
+    null_move_ep_stack: [Option<Square>; 130],
+    null_move_ep_len: u8,
 
     mailbox: [Option<Piece>; 64],
 }
@@ -53,7 +55,8 @@ impl Board {
             fullmove_number: 1,
             position_hash: 0,
             move_history: None,
-            null_move_saved_ep: None,
+            null_move_ep_stack: [None; 130],
+            null_move_ep_len: 0,
             mailbox: [None; 64],
         }
     }

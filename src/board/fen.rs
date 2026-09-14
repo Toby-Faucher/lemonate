@@ -1,4 +1,5 @@
 use crate::{Board, CastlingRights, Color, FenError, Piece, Square};
+use super::zobrist::{zobrist_en_passant_hash, zobrist_side_to_move_hash};
 impl Board {
     pub fn from_fen(fen: &str) -> Result<Self, FenError> {
         let parts: Vec<&str> = fen.split_whitespace().collect();
@@ -26,6 +27,17 @@ impl Board {
 
         board.halfmove_clock = parts[4].parse().map_err(|_| FenError::InvalidHalfMove)?;
         board.fullmove_number = parts[5].parse().map_err(|_| FenError::InvalidFullMove)?;
+
+        // Fold side-to-move, castling rights, and en passant square into the
+        // Zobrist hash so positions differing only in these fields hash
+        // differently (matching the incremental updates in make/unmake).
+        if board.side_to_move == Color::Black {
+            board.position_hash ^= zobrist_side_to_move_hash();
+        }
+        board.position_hash ^= board.castling_rights_hash();
+        if let Some(ep) = board.en_passant_square {
+            board.position_hash ^= zobrist_en_passant_hash(Some(ep.file()));
+        }
 
         Ok(board)
     }
@@ -59,11 +71,40 @@ impl Board {
                     return Err(FenError::InvalidPiecePlacement);
                 }
             }
-            if file != 8 {
-                return Err(FenError::InvalidPiecePlacement);
-            }
+        if file != 8 {
+            return Err(FenError::InvalidPiecePlacement);
+        }
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_fen_hash_distinguishes_side_to_move() {
+        let w = Board::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1").unwrap();
+        let b = Board::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR b KQkq - 0 1").unwrap();
+        assert_ne!(w.position_hash, b.position_hash);
+    }
+
+    #[test]
+    fn test_fen_hash_distinguishes_castling_rights() {
+        let full =
+            Board::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1").unwrap();
+        let none = Board::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w - - 0 1").unwrap();
+        assert_ne!(full.position_hash, none.position_hash);
+    }
+
+    #[test]
+    fn test_fen_hash_distinguishes_en_passant() {
+        let with_ep =
+            Board::from_fen("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1").unwrap();
+        let without_ep =
+            Board::from_fen("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1").unwrap();
+        assert_ne!(with_ep.position_hash, without_ep.position_hash);
     }
 }
