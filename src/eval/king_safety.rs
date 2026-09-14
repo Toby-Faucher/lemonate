@@ -32,15 +32,18 @@ impl KingSafetyEval {
         self.evaluate_with_phase(board, phase)
     }
 
-    /// Evaluate king safety with a pre-computed game phase.
-    ///
-    /// Skips the internal `phase.calculate` call so callers that already
-    /// know the phase can share one calculation across all eval terms.
-    /// Scores are bit-identical to `evaluate` when passed
-    /// `self.phase.calculate(board)`.
     pub fn evaluate_with_phase(&self, board: &Board, phase: i32) -> i32 {
-        let (w_mg, w_eg) = self.evaluate_king(board, Color::White);
-        let (b_mg, b_eg) = self.evaluate_king(board, Color::Black);
+        self.evaluate_with_phase_and_weights(board, phase, &super::EvalWeights::DEFAULT)
+    }
+
+    pub fn evaluate_with_phase_and_weights(
+        &self,
+        board: &Board,
+        phase: i32,
+        weights: &super::EvalWeights,
+    ) -> i32 {
+        let (w_mg, w_eg) = self.evaluate_king_with_weights(board, Color::White, weights);
+        let (b_mg, b_eg) = self.evaluate_king_with_weights(board, Color::Black, weights);
 
         let mg_score = w_mg - b_mg;
         let eg_score = w_eg - b_eg;
@@ -49,6 +52,15 @@ impl KingSafetyEval {
     }
 
     fn evaluate_king(&self, board: &Board, color: Color) -> (i32, i32) {
+        self.evaluate_king_with_weights(board, color, &super::EvalWeights::DEFAULT)
+    }
+
+    fn evaluate_king_with_weights(
+        &self,
+        board: &Board,
+        color: Color,
+        weights: &super::EvalWeights,
+    ) -> (i32, i32) {
         let mut mg = 0;
         let mut eg = 0;
 
@@ -57,13 +69,13 @@ impl KingSafetyEval {
         let our_pawns = board.piece_bitboard(color, crate::PieceType::Pawn);
         let enemy_pawns = board.piece_bitboard(color.opposite(), crate::PieceType::Pawn);
 
-        // Pawn shield evaluation.
-        let (shield_mg, shield_eg) = self.evaluate_pawn_shield(king_sq, our_pawns, color);
+        let (shield_mg, shield_eg) =
+            self.evaluate_pawn_shield_with_weights(king_sq, our_pawns, color, weights);
         mg += shield_mg;
         eg += shield_eg;
 
-        // Open files near king.
-        let (files_mg, files_eg) = self.evaluate_open_files(king_sq, our_pawns, enemy_pawns);
+        let (files_mg, files_eg) =
+            self.evaluate_open_files_with_weights(king_sq, our_pawns, enemy_pawns, weights);
         mg += files_mg;
         eg += files_eg;
 
@@ -76,11 +88,12 @@ impl KingSafetyEval {
         Square::from_index(king_bb.0.trailing_zeros() as usize)
     }
 
-    fn evaluate_pawn_shield(
+    fn evaluate_pawn_shield_with_weights(
         &self,
         king_sq: Square,
         our_pawns: Bitboard,
         color: Color,
+        weights: &super::EvalWeights,
     ) -> (i32, i32) {
         let mut mg = 0;
         let mut eg = 0;
@@ -101,22 +114,23 @@ impl KingSafetyEval {
             };
 
             if rank_diff == 1 {
-                mg += PAWN_SHIELD_CLOSE_MG;
-                eg += PAWN_SHIELD_CLOSE_EG;
+                mg += weights.pawn_shield_close_mg;
+                eg += weights.pawn_shield_close_eg;
             } else if rank_diff == 2 {
-                mg += PAWN_SHIELD_FAR_MG;
-                eg += PAWN_SHIELD_FAR_EG;
+                mg += weights.pawn_shield_far_mg;
+                eg += weights.pawn_shield_far_eg;
             }
         }
 
         (mg, eg)
     }
 
-    fn evaluate_open_files(
+    fn evaluate_open_files_with_weights(
         &self,
         king_sq: Square,
         our_pawns: Bitboard,
         enemy_pawns: Bitboard,
+        weights: &super::EvalWeights,
     ) -> (i32, i32) {
         let mut mg = 0;
         let mut eg = 0;
@@ -135,11 +149,11 @@ impl KingSafetyEval {
             let enemy_on_file = (enemy_pawns & file_mask).is_not_empty();
 
             if !our_on_file && !enemy_on_file {
-                mg += OPEN_FILE_NEAR_KING_MG;
-                eg += OPEN_FILE_NEAR_KING_EG;
+                mg += weights.open_file_near_king_mg;
+                eg += weights.open_file_near_king_eg;
             } else if !our_on_file {
-                mg += SEMI_OPEN_FILE_NEAR_KING_MG;
-                eg += SEMI_OPEN_FILE_NEAR_KING_EG;
+                mg += weights.semi_open_file_near_king_mg;
+                eg += weights.semi_open_file_near_king_eg;
             }
         }
 
@@ -188,5 +202,38 @@ mod tests {
 
         // Symmetric structure gives balanced score.
         assert!(score.abs() < 10);
+    }
+
+    #[test]
+    fn weighted_default_matches_unweighted() {
+        use crate::eval::EvalWeights;
+
+        let board = Board::from_fen("8/8/8/8/8/8/5PPP/6K1 w - - 0 1").unwrap();
+        let eval = KingSafetyEval::new();
+
+        let default = eval.evaluate_king(&board, Color::White);
+        let weighted =
+            eval.evaluate_king_with_weights(&board, Color::White, &EvalWeights::DEFAULT);
+
+        assert_eq!(default, weighted);
+    }
+
+    #[test]
+    fn known_fen_scores_unchanged() {
+        let cases = [
+            (
+                "r1bqkbnr/pppppppp/8/8/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 0 1",
+                -14,
+            ),
+            (
+                "r1bqk2r/pp1nbppp/2p2n2/3p4/3P4/2N1PN2/PPP1BPPP/R1BQK2R w KQ - 0 1",
+                18,
+            ),
+        ];
+        let eval = KingSafetyEval::new();
+        for (fen, expected) in cases {
+            let board = Board::from_fen(fen).unwrap();
+            assert_eq!(eval.evaluate(&board), expected, "mismatch for {}", fen);
+        }
     }
 }
