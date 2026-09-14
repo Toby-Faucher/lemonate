@@ -45,6 +45,53 @@ pub fn fit_k(positions: &[LabeledPosition], weights: &EvalWeights) -> f64 {
     best_k
 }
 
+/// Classic Texel-style local search: for each tunable scalar, try +1
+/// then -1, keeping whichever (if any) reduces the dataset's mean
+/// squared error. Repeats full sweeps over every parameter until a
+/// sweep makes no improvement, or `max_sweeps` is reached.
+pub fn coordinate_descent(
+    positions: &[LabeledPosition],
+    initial: &EvalWeights,
+    k: f64,
+    max_sweeps: usize,
+) -> (EvalWeights, f64) {
+    let mut params = initial.to_vec();
+    let mut best_error = mean_squared_error(positions, &EvalWeights::from_vec(&params), k);
+
+    for sweep in 0..max_sweeps {
+        let mut improved_this_sweep = false;
+
+        for i in 0..params.len() {
+            let original = params[i];
+
+            params[i] = original + 1;
+            let mut error = mean_squared_error(positions, &EvalWeights::from_vec(&params), k);
+            if error < best_error {
+                best_error = error;
+                improved_this_sweep = true;
+                continue;
+            }
+
+            params[i] = original - 1;
+            error = mean_squared_error(positions, &EvalWeights::from_vec(&params), k);
+            if error < best_error {
+                best_error = error;
+                improved_this_sweep = true;
+                continue;
+            }
+
+            params[i] = original;
+        }
+
+        eprintln!("sweep {}: error = {:.6}", sweep + 1, best_error);
+        if !improved_this_sweep {
+            break;
+        }
+    }
+
+    (EvalWeights::from_vec(&params), best_error)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -84,5 +131,40 @@ mod tests {
         let positions = vec![LabeledPosition { board, result: 0.5 }];
         let k = fit_k(&positions, &EvalWeights::DEFAULT);
         assert!(k > 0.0 && k < 3.0, "k out of expected range: {k}");
+    }
+
+    #[test]
+    fn coordinate_descent_never_increases_error() {
+        let board = Board::starting_position();
+        let mut positions = Vec::new();
+        for i in 0..10 {
+            let result = if i % 2 == 0 { 0.5 } else { 0.6 };
+            positions.push(LabeledPosition {
+                board: board.clone(),
+                result,
+            });
+        }
+
+        let k = fit_k(&positions, &EvalWeights::DEFAULT);
+        let initial_error = mean_squared_error(&positions, &EvalWeights::DEFAULT, k);
+        let (_tuned, final_error) = coordinate_descent(&positions, &EvalWeights::DEFAULT, k, 3);
+
+        assert!(
+            final_error <= initial_error,
+            "error increased: {initial_error} -> {final_error}"
+        );
+    }
+
+    #[test]
+    fn coordinate_descent_with_zero_sweeps_is_a_no_op() {
+        let board = Board::starting_position();
+        let positions = vec![LabeledPosition { board, result: 0.5 }];
+        let k = 1.0;
+        let initial_error = mean_squared_error(&positions, &EvalWeights::DEFAULT, k);
+
+        let (tuned, final_error) = coordinate_descent(&positions, &EvalWeights::DEFAULT, k, 0);
+
+        assert_eq!(final_error, initial_error);
+        assert_eq!(tuned.to_vec(), EvalWeights::DEFAULT.to_vec());
     }
 }
