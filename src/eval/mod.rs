@@ -7,6 +7,7 @@ mod mobility;
 mod pawn_structure;
 mod phase;
 mod pst;
+mod weights;
 
 pub use king_safety::KingSafetyEval;
 pub use material::MaterialEvaluator;
@@ -14,6 +15,7 @@ pub use mobility::MobilityEval;
 pub use pawn_structure::PawnStructureEval;
 pub use phase::GamePhase;
 pub use pst::PieceSquareTableEval;
+pub use weights::EvalWeights;
 
 pub struct Evaluator {
     material: MaterialEvaluator,
