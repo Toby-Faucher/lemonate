@@ -39,14 +39,7 @@ impl Evaluator {
     }
 
     pub fn evaluate(&self, board: &Board) -> i32 {
-        // Compute the game phase once and share it across all tapered
-        // eval terms.
-        let phase = self.phase.calculate(board);
-        let pst_score = self.pst.evaluate_with_phase(board, phase);
-        let pawn_score = self.pawn_structure.evaluate_with_phase(board, phase);
-        let king_score = self.king_safety.evaluate_with_phase(board, phase);
-        let mobility_score = self.mobility.evaluate_with_phase(board, phase);
-        let score = pst_score + pawn_score + king_score + mobility_score;
+        let score = self.static_eval_white_pov(board, &EvalWeights::DEFAULT);
 
         // Return score from side-to-move's perspective for negamax
         if board.side_to_move() == Color::White {
@@ -54,6 +47,24 @@ impl Evaluator {
         } else {
             -score
         }
+    }
+
+    /// The tapered evaluation score from White's perspective (no
+    /// side-to-move flip), computed with an explicit `weights` set.
+    /// Used by the tuner to score training positions consistently
+    /// regardless of which side is to move.
+    pub fn static_eval_white_pov(&self, board: &Board, weights: &EvalWeights) -> i32 {
+        let phase = self.phase.calculate(board);
+        self.pst.evaluate_with_phase_and_weights(board, phase, weights)
+            + self
+                .pawn_structure
+                .evaluate_with_phase_and_weights(board, phase, weights)
+            + self
+                .king_safety
+                .evaluate_with_phase_and_weights(board, phase, weights)
+            + self
+                .mobility
+                .evaluate_with_phase_and_weights(board, phase, weights)
     }
 
     pub fn evaluate_detailed(&self, board: &Board) -> EvalDetails {
@@ -90,4 +101,45 @@ impl Default for Evaluator {
 pub fn evaluate(board: &Board) -> i32 {
     let evaluator = Evaluator::new();
     evaluator.evaluate(board)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Board;
+
+    const KNOWN_CASES: [(&str, i32); 5] = [
+        ("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", 0),
+        (
+            "r1bqkbnr/pppppppp/8/8/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 0 1",
+            449,
+        ),
+        ("8/8/8/8/8/4k3/8/4K3 w - - 0 1", -34),
+        ("r3k2r/ppp2ppp/8/8/8/8/PPP2PPP/R3K2R w KQkq - 0 1", 0),
+        (
+            "r1bqk2r/pp1nbppp/2p2n2/3p4/3P4/2N1PN2/PPP1BPPP/R1BQK2R w KQ - 0 1",
+            245,
+        ),
+    ];
+
+    #[test]
+    fn evaluate_matches_pre_refactor_values() {
+        let evaluator = Evaluator::new();
+        for (fen, expected) in KNOWN_CASES {
+            let board = Board::from_fen(fen).unwrap();
+            assert_eq!(evaluator.evaluate(&board), expected, "mismatch for {}", fen);
+        }
+    }
+
+    #[test]
+    fn static_eval_white_pov_matches_known_values() {
+        // All KNOWN_CASES FENs have White to move, so evaluate() and
+        // static_eval_white_pov() coincide (no side-to-move flip applies).
+        let evaluator = Evaluator::new();
+        for (fen, expected) in KNOWN_CASES {
+            let board = Board::from_fen(fen).unwrap();
+            let score = evaluator.static_eval_white_pov(&board, &EvalWeights::DEFAULT);
+            assert_eq!(score, expected, "white-POV mismatch for {}", fen);
+        }
+    }
 }
