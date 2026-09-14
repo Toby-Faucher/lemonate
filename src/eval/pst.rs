@@ -89,44 +89,14 @@ pub const EG_KING_TABLE: [i32; 64] = [
 ];
 
 pub struct PieceSquareTableEval {
-    mg_table: [&'static [i32; 64]; 6],
-    eg_table: [&'static [i32; 64]; 6],
     phase: GamePhase,
 }
 
 impl PieceSquareTableEval {
     pub fn new() -> Self {
         Self {
-            mg_table: [
-                &MG_PAWN_TABLE,
-                &MG_KNIGHT_TABLE,
-                &MG_BISHOP_TABLE,
-                &MG_ROOK_TABLE,
-                &MG_QUEEN_TABLE,
-                &MG_KING_TABLE,
-            ],
-            eg_table: [
-                &EG_PAWN_TABLE,
-                &EG_KNIGHT_TABLE,
-                &EG_BISHOP_TABLE,
-                &EG_ROOK_TABLE,
-                &EG_QUEEN_TABLE,
-                &EG_KING_TABLE,
-            ],
             phase: GamePhase::new(),
         }
-    }
-
-    /// Get the PST value for a piece on a square (from White's perspective)
-    #[allow(dead_code)]
-    fn get_piece_value(&self, piece_type: PieceType, square: u8, is_mg: bool) -> i32 {
-        let table = if is_mg {
-            self.mg_table[piece_type as usize]
-        } else {
-            self.eg_table[piece_type as usize]
-        };
-
-        table[square as usize]
     }
 
     /// Evaluate the position using tapered evaluation
@@ -142,6 +112,19 @@ impl PieceSquareTableEval {
     /// calculation across all eval terms. Scores are bit-identical to
     /// `evaluate` when passed `self.phase.calculate(board)`.
     pub fn evaluate_with_phase(&self, board: &Board, phase: i32) -> i32 {
+        self.evaluate_with_phase_and_weights(board, phase, &super::EvalWeights::DEFAULT)
+    }
+
+    /// Same as `evaluate_with_phase`, but scores PST terms from an
+    /// explicit `weights` set instead of the engine's default. Material
+    /// (`MG_VALUE`/`EG_VALUE`) is always the fixed default regardless of
+    /// `weights` - only PST tables are tunable here.
+    pub fn evaluate_with_phase_and_weights(
+        &self,
+        board: &Board,
+        phase: i32,
+        weights: &super::EvalWeights,
+    ) -> i32 {
         let mut mg_score = 0;
         let mut eg_score = 0;
 
@@ -154,8 +137,8 @@ impl PieceSquareTableEval {
             PieceType::King,
         ] {
             let piece_idx = piece_type as usize;
-            let mg_table = self.mg_table[piece_idx];
-            let eg_table = self.eg_table[piece_idx];
+            let mg_table = &weights.pst_mg[piece_idx];
+            let eg_table = &weights.pst_eg[piece_idx];
 
             // White pieces
             let mut white_bb = board.piece_bitboard(Color::White, piece_type);
@@ -187,5 +170,45 @@ impl PieceSquareTableEval {
 impl Default for PieceSquareTableEval {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::eval::EvalWeights;
+
+    #[test]
+    fn weighted_default_matches_unweighted() {
+        let board = Board::from_fen(
+            "r1bqkbnr/pppppppp/8/8/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 0 1",
+        )
+        .unwrap();
+        let eval = PieceSquareTableEval::new();
+        let phase = eval.phase.calculate(&board);
+
+        let default_score = eval.evaluate_with_phase(&board, phase);
+        let weighted_score =
+            eval.evaluate_with_phase_and_weights(&board, phase, &EvalWeights::DEFAULT);
+
+        assert_eq!(default_score, weighted_score);
+        assert_eq!(default_score, 338); // captured ground truth for this FEN
+    }
+
+    #[test]
+    fn known_fen_scores_unchanged() {
+        let cases = [
+            ("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", 0),
+            ("8/8/8/8/8/4k3/8/4K3 w - - 0 1", -34),
+            (
+                "r1bqk2r/pp1nbppp/2p2n2/3p4/3P4/2N1PN2/PPP1BPPP/R1BQK2R w KQ - 0 1",
+                183,
+            ),
+        ];
+        let eval = PieceSquareTableEval::new();
+        for (fen, expected) in cases {
+            let board = Board::from_fen(fen).unwrap();
+            assert_eq!(eval.evaluate(&board), expected, "mismatch for {}", fen);
+        }
     }
 }
