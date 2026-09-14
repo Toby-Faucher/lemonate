@@ -51,6 +51,7 @@ impl KingSafetyEval {
         self.phase.taper(mg_score, eg_score, phase)
     }
 
+    #[cfg(test)]
     fn evaluate_king(&self, board: &Board, color: Color) -> (i32, i32) {
         self.evaluate_king_with_weights(board, color, &super::EvalWeights::DEFAULT)
     }

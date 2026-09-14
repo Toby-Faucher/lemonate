@@ -135,9 +135,11 @@ pub fn fit_k(positions: &[LabeledPosition], weights: &EvalWeights) -> f64 {
     let mut best_k = 1.0;
     let mut best_error = mean_squared_error(positions, weights, best_k);
 
-    let mut low = 0.1;
-    let mut high = 2.0;
-    for _ in 0..6 {
+    let initial_low = 0.1;
+    let initial_high = 4.0;
+    let mut low = initial_low;
+    let mut high = initial_high;
+    for round in 0..6 {
         let step = (high - low) / 20.0;
         let mut k = low;
         while k <= high {
@@ -147,6 +149,16 @@ pub fn fit_k(positions: &[LabeledPosition], weights: &EvalWeights) -> f64 {
                 best_k = k;
             }
             k += step;
+        }
+        if round == 0 {
+            let initial_step = (initial_high - initial_low) / 20.0;
+            if (best_k - initial_low).abs() <= initial_step
+                || (initial_high - best_k).abs() <= initial_step
+            {
+                eprintln!(
+                    "warning: fit_k's first pass found its best K ({best_k:.4}) at the edge of the initial search bracket [{initial_low}, {initial_high}] — the true optimum may lie outside this range"
+                );
+            }
         }
         low = (best_k - step * 2.0).max(0.001);
         high = best_k + step * 2.0;

@@ -52,7 +52,7 @@ fn parse_line(line: &str) -> Option<LabeledPosition> {
 
 #[cfg(test)]
 mod tests {
-    use super::{load_dataset, LabeledPosition};
+    use super::*;
 
     #[test]
     fn parses_valid_lines() {

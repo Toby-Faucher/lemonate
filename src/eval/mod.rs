@@ -142,4 +142,21 @@ mod tests {
             assert_eq!(score, expected, "white-POV mismatch for {}", fen);
         }
     }
+
+    #[test]
+    fn evaluate_flips_sign_for_black_to_move() {
+        // Same position as one of KNOWN_CASES but with Black to move —
+        // static_eval_white_pov must be unchanged (side-to-move never
+        // enters that computation), while evaluate() must return its
+        // negation. Values captured directly from the compiled engine.
+        let fen = "r1bqkbnr/pppppppp/8/8/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq - 0 1";
+        let board = Board::from_fen(fen).unwrap();
+        let evaluator = Evaluator::new();
+
+        assert_eq!(evaluator.evaluate(&board), -449);
+        assert_eq!(
+            evaluator.static_eval_white_pov(&board, &EvalWeights::DEFAULT),
+            449
+        );
+    }
 }

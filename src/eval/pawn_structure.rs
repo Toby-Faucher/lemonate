@@ -137,6 +137,7 @@ impl PawnStructureEval {
         self.phase.taper(mg_score, eg_score, phase)
     }
 
+    #[cfg(test)]
     fn evaluate_pawns(
         &self,
         our_pawns: Bitboard,

@@ -28,6 +28,12 @@ use super::pst::{
 ///
 /// Material values (`MG_VALUE`/`EG_VALUE` in `pst.rs`) are
 /// deliberately not included here - they stay fixed.
+///
+/// Adding a field here also requires updating `to_vec`, `from_vec`,
+/// and `format_weights` (in `src/bin/tuner/optimizer.rs`) to include
+/// it, plus the expected-length constants in their tests
+/// (`to_vec_has_expected_length`, `format_weights_has_expected_line_count`)
+/// — none of those are automatically kept in sync by the compiler.
 #[derive(Clone, Debug, PartialEq)]
 pub struct EvalWeights {
     pub pst_mg: [[i32; 64]; 6],
