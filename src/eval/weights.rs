@@ -28,7 +28,7 @@ use super::pst::{
 ///
 /// Material values (`MG_VALUE`/`EG_VALUE` in `pst.rs`) are
 /// deliberately not included here - they stay fixed.
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct EvalWeights {
     pub pst_mg: [[i32; 64]; 6],
     pub pst_eg: [[i32; 64]; 6],
@@ -315,11 +315,7 @@ mod tests {
         let flat = original.to_vec();
         let rebuilt = EvalWeights::from_vec(&flat);
 
-        assert_eq!(rebuilt.pst_mg, original.pst_mg);
-        assert_eq!(rebuilt.pst_eg, original.pst_eg);
-        assert_eq!(rebuilt.doubled_pawn_mg, original.doubled_pawn_mg);
-        assert_eq!(rebuilt.passed_pawn_mg, original.passed_pawn_mg);
-        assert_eq!(rebuilt.queen_mobility_eg, original.queen_mobility_eg);
+        assert_eq!(rebuilt, original);
     }
 
     #[test]
