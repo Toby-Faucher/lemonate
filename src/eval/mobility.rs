@@ -60,8 +60,17 @@ impl MobilityEval {
     /// Scores are bit-identical to `evaluate` when passed
     /// `self.phase.calculate(board)`.
     pub fn evaluate_with_phase(&self, board: &Board, phase: i32) -> i32 {
-        let (w_mg, w_eg) = self.evaluate_color(board, Color::White);
-        let (b_mg, b_eg) = self.evaluate_color(board, Color::Black);
+        self.evaluate_with_phase_and_weights(board, phase, &super::EvalWeights::DEFAULT)
+    }
+
+    pub fn evaluate_with_phase_and_weights(
+        &self,
+        board: &Board,
+        phase: i32,
+        weights: &super::EvalWeights,
+    ) -> i32 {
+        let (w_mg, w_eg) = self.evaluate_color_with_weights(board, Color::White, weights);
+        let (b_mg, b_eg) = self.evaluate_color_with_weights(board, Color::Black, weights);
 
         let mg_score = w_mg - b_mg;
         let eg_score = w_eg - b_eg;
@@ -69,7 +78,12 @@ impl MobilityEval {
         self.phase.taper(mg_score, eg_score, phase)
     }
 
-    fn evaluate_color(&self, board: &Board, color: Color) -> (i32, i32) {
+    fn evaluate_color_with_weights(
+        &self,
+        board: &Board,
+        color: Color,
+        weights: &super::EvalWeights,
+    ) -> (i32, i32) {
         let mut mg = 0;
         let mut eg = 0;
 
@@ -90,38 +104,35 @@ impl MobilityEval {
 
         let blockers = board.all_pieces();
 
-        // Knight mobility.
         let (knight_mg, knight_eg) =
-            self.evaluate_knight_mobility(board, color, friendly);
+            self.evaluate_knight_mobility_with_weights(board, color, friendly, weights);
         mg += knight_mg;
         eg += knight_eg;
 
-        // Bishop mobility.
         let (bishop_mg, bishop_eg) =
-            self.evaluate_bishop_mobility(board, color, friendly, blockers);
+            self.evaluate_bishop_mobility_with_weights(board, color, friendly, blockers, weights);
         mg += bishop_mg;
         eg += bishop_eg;
 
-        // Rook mobility.
         let (rook_mg, rook_eg) =
-            self.evaluate_rook_mobility(board, color, friendly, blockers);
+            self.evaluate_rook_mobility_with_weights(board, color, friendly, blockers, weights);
         mg += rook_mg;
         eg += rook_eg;
 
-        // Queen mobility.
         let (queen_mg, queen_eg) =
-            self.evaluate_queen_mobility(board, color, friendly, blockers);
+            self.evaluate_queen_mobility_with_weights(board, color, friendly, blockers, weights);
         mg += queen_mg;
         eg += queen_eg;
 
         (mg, eg)
     }
 
-    fn evaluate_knight_mobility(
+    fn evaluate_knight_mobility_with_weights(
         &self,
         board: &Board,
         color: Color,
         friendly: Bitboard,
+        weights: &super::EvalWeights,
     ) -> (i32, i32) {
         let mut mg = 0;
         let mut eg = 0;
@@ -133,23 +144,23 @@ impl MobilityEval {
         while knights.0 != 0 {
             let sq = knights.pop_lsb().unwrap();
             let attacks = ATTACK_TABLE.knight_attacks(sq);
-            // Mobility = attacked squares minus friendly pieces.
             let mobility = (attacks & !friendly).count_pieces() as usize;
-            let mobility = mobility.min(KNIGHT_MOBILITY_MG.len() - 1);
+            let mobility = mobility.min(weights.knight_mobility_mg.len() - 1);
 
-            mg += KNIGHT_MOBILITY_MG[mobility];
-            eg += KNIGHT_MOBILITY_EG[mobility];
+            mg += weights.knight_mobility_mg[mobility];
+            eg += weights.knight_mobility_eg[mobility];
         }
 
         (mg, eg)
     }
 
-    fn evaluate_bishop_mobility(
+    fn evaluate_bishop_mobility_with_weights(
         &self,
         board: &Board,
         color: Color,
         friendly: Bitboard,
         blockers: Bitboard,
+        weights: &super::EvalWeights,
     ) -> (i32, i32) {
         let mut mg = 0;
         let mut eg = 0;
@@ -162,21 +173,22 @@ impl MobilityEval {
             let sq = bishops.pop_lsb().unwrap();
             let attacks = ATTACK_TABLE.bishop_attacks(sq, blockers);
             let mobility = (attacks & !friendly).count_pieces() as usize;
-            let mobility = mobility.min(BISHOP_MOBILITY_MG.len() - 1);
+            let mobility = mobility.min(weights.bishop_mobility_mg.len() - 1);
 
-            mg += BISHOP_MOBILITY_MG[mobility];
-            eg += BISHOP_MOBILITY_EG[mobility];
+            mg += weights.bishop_mobility_mg[mobility];
+            eg += weights.bishop_mobility_eg[mobility];
         }
 
         (mg, eg)
     }
 
-    fn evaluate_rook_mobility(
+    fn evaluate_rook_mobility_with_weights(
         &self,
         board: &Board,
         color: Color,
         friendly: Bitboard,
         blockers: Bitboard,
+        weights: &super::EvalWeights,
     ) -> (i32, i32) {
         let mut mg = 0;
         let mut eg = 0;
@@ -189,21 +201,22 @@ impl MobilityEval {
             let sq = rooks.pop_lsb().unwrap();
             let attacks = ATTACK_TABLE.rook_attacks(sq, blockers);
             let mobility = (attacks & !friendly).count_pieces() as usize;
-            let mobility = mobility.min(ROOK_MOBILITY_MG.len() - 1);
+            let mobility = mobility.min(weights.rook_mobility_mg.len() - 1);
 
-            mg += ROOK_MOBILITY_MG[mobility];
-            eg += ROOK_MOBILITY_EG[mobility];
+            mg += weights.rook_mobility_mg[mobility];
+            eg += weights.rook_mobility_eg[mobility];
         }
 
         (mg, eg)
     }
 
-    fn evaluate_queen_mobility(
+    fn evaluate_queen_mobility_with_weights(
         &self,
         board: &Board,
         color: Color,
         friendly: Bitboard,
         blockers: Bitboard,
+        weights: &super::EvalWeights,
     ) -> (i32, i32) {
         let mut mg = 0;
         let mut eg = 0;
@@ -216,10 +229,10 @@ impl MobilityEval {
             let sq = queens.pop_lsb().unwrap();
             let attacks = ATTACK_TABLE.queen_attacks(sq, blockers);
             let mobility = (attacks & !friendly).count_pieces() as usize;
-            let mobility = mobility.min(QUEEN_MOBILITY_MG.len() - 1);
+            let mobility = mobility.min(weights.queen_mobility_mg.len() - 1);
 
-            mg += QUEEN_MOBILITY_MG[mobility];
-            eg += QUEEN_MOBILITY_EG[mobility];
+            mg += weights.queen_mobility_mg[mobility];
+            eg += weights.queen_mobility_eg[mobility];
         }
 
         (mg, eg)
@@ -401,6 +414,39 @@ mod tests {
                     fen
                 );
             }
+        }
+    }
+
+    #[test]
+    fn weighted_default_matches_unweighted() {
+        use crate::eval::EvalWeights;
+
+        let board = Board::from_fen("8/8/8/8/4N3/8/8/4K2k w - - 0 1").unwrap();
+        let eval = MobilityEval::new();
+
+        let default = eval.evaluate(&board);
+        let phase = eval.phase.calculate(&board);
+        let weighted = eval.evaluate_with_phase_and_weights(&board, phase, &EvalWeights::DEFAULT);
+
+        assert_eq!(default, weighted);
+    }
+
+    #[test]
+    fn known_fen_scores_unchanged() {
+        let cases = [
+            (
+                "r1bqkbnr/pppppppp/8/8/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 0 1",
+                130,
+            ),
+            (
+                "r1bqk2r/pp1nbppp/2p2n2/3p4/3P4/2N1PN2/PPP1BPPP/R1BQK2R w KQ - 0 1",
+                39,
+            ),
+        ];
+        let eval = MobilityEval::new();
+        for (fen, expected) in cases {
+            let board = Board::from_fen(fen).unwrap();
+            assert_eq!(eval.evaluate(&board), expected, "mismatch for {}", fen);
         }
     }
 }
