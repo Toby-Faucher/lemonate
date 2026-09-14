@@ -77,18 +77,32 @@ unchanged by construction.
 ### 2. Refactor of the 4 eval modules
 
 `PieceSquareTableEval`, `PawnStructureEval`, `KingSafetyEval`, and
-`MobilityEval` each gain a `weights: &'static EvalWeights` field.
-`::new()` sets it to `&EvalWeights::DEFAULT` (no call-site changes
-needed anywhere else in the engine — `Evaluator::new()`,
-search, UCI, etc. are all unaffected). A new `::with_weights(&'static
-EvalWeights)` constructor exists for the tuner's use. Internal
-`evaluate`/`evaluate_with_phase` bodies swap direct references to the
-old top-level consts for `self.weights.<field>` lookups.
+`MobilityEval` each gain a `evaluate_with_phase_and_weights(&self,
+board: &Board, phase: i32, weights: &EvalWeights) -> i32` method
+(and, where the module's `evaluate`/`evaluate_with_phase` compute
+sub-scores via a private per-color helper, that helper gains a
+`weights: &EvalWeights` parameter too). The existing
+parameterless `evaluate`/`evaluate_with_phase` methods become thin
+wrappers that pass `&EvalWeights::DEFAULT` — **no call-site changes
+needed anywhere else in the engine** (`Evaluator::new()`, search,
+UCI, all existing tests are unaffected), and no stored field/lifetime
+parameter is needed on the structs themselves. The tuner calls the
+`_and_weights` variants directly with its candidate `EvalWeights`,
+which lives only as long as one trial (an ordinary stack value, not
+`'static`) — avoiding the memory-leak trap of a `&'static` field that
+can't represent a transient candidate. Internal bodies swap direct
+references to the old top-level per-module consts (`DOUBLED_PAWN_MG`,
+`MG_PAWN_TABLE`, etc.) for `weights.<field>` lookups; those old
+top-level consts are kept as `pub const NAME: T =
+EvalWeights::DEFAULT.field;` aliases so the existing test suites
+(50+ pawn structure tests, king safety tests, mobility tests) that
+reference them by name keep compiling unchanged, with `EvalWeights`
+as the single source of truth they now alias.
 
 **Verification**: a test asserting `Evaluator::new().evaluate(&board)`
-is bit-identical, across a batch of representative FENs, to the
-pre-refactor output. This runs *before* the tuner is built, as a
-standalone checkpoint.
+produces exact known values (captured from the current, pre-refactor
+build) on a batch of representative FENs. This runs *before* the
+tuner is built, as a standalone checkpoint.
 
 ### 3. Dataset loader
 
