@@ -1,5 +1,5 @@
 use crate::dataset::LabeledPosition;
-use lemonate::{Board, EvalWeights, Evaluator};
+use lemonate::{EvalWeights, Evaluator};
 
 pub fn sigmoid(eval: f64, k: f64) -> f64 {
     1.0 / (1.0 + 10f64.powf(-k * eval / 400.0))
@@ -48,6 +48,7 @@ pub fn fit_k(positions: &[LabeledPosition], weights: &EvalWeights) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lemonate::Board;
 
     #[test]
     fn mse_is_near_zero_for_drawn_symmetric_position() {
