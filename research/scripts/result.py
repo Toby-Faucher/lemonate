@@ -15,12 +15,16 @@ def derive_status(gate, verdict, infra_error):
         return "broken"
     if any(gate.get(stage) == "fail" for stage in CORRECTNESS):
         return "rejected"
+    # Check that all correctness stages plus preflight are exactly "pass"
+    for stage in ("preflight", "build", "test", "perft"):
+        if gate.get(stage) != "pass":
+            return "broken"
     return {"H1": "accepted", "H0": "rejected", "inconclusive": "inconclusive"}.get(verdict, "broken")
 
 
 def build_result(baseline, candidate, config_hash, gate, sprt=None, reason="", infra_error=False):
     full = {stage: gate.get(stage, "skipped") for stage in STAGES}
-    verdict = sprt["verdict"] if sprt else None
+    verdict = sprt.get("verdict") if sprt else None
     return {
         "baseline_commit": baseline,
         "candidate_commit": candidate,
@@ -44,8 +48,30 @@ def main():
     p.add_argument("--infra-error", action="store_true")
     a = p.parse_args()
 
-    gate = dict(item.split("=", 1) for item in a.gate)
-    sprt = json.loads(Path(a.sprt_file).read_text()) if a.sprt_file else None
+    # Validate and parse gate arguments
+    gate = {}
+    valid_values = {"pass", "fail", "error", "skipped"}
+    for item in a.gate:
+        if "=" not in item:
+            p.error(f"--gate argument must be STAGE=VALUE, got: {item}")
+        stage, value = item.split("=", 1)
+        if stage not in STAGES:
+            p.error(f"Invalid stage name: {stage}. Must be one of: {', '.join(STAGES)}")
+        if value not in valid_values:
+            p.error(f"Invalid gate value: {value}. Must be one of: {', '.join(sorted(valid_values))}")
+        gate[stage] = value
+
+    # Load sprt file if provided
+    sprt = None
+    if a.sprt_file:
+        try:
+            sprt_path = Path(a.sprt_file)
+            sprt = json.loads(sprt_path.read_text())
+        except FileNotFoundError:
+            p.error(f"--sprt-file not found: {a.sprt_file}")
+        except json.JSONDecodeError:
+            p.error(f"--sprt-file is not valid JSON: {a.sprt_file}")
+
     data = build_result(a.baseline, a.candidate, a.config_hash, gate, sprt, a.reason, a.infra_error)
     Path(a.out).write_text(json.dumps(data, indent=2) + "\n")
 
