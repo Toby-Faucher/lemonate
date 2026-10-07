@@ -1,7 +1,7 @@
 # Research framework: verified engine-improvement loop
 
 Date: 2026-10-06
-Status: design, awaiting review
+Status: approved; implementation plan at docs/superpowers/plans/2026-10-06-research-framework.md
 
 ## Goal
 
@@ -148,3 +148,33 @@ Both must behave as stated before any real result is trusted.
 - Multi-machine matches.
 - Automatic merging.
 - Slow-TC confirmation runs (re-run an accepted experiment manually at `60+0.6`).
+
+## Implementation notes
+
+Decisions made while writing the plan, from reading the code:
+
+- Attempt worktrees live in `.worktrees/<id>`, the directory the repo already gitignores.
+- The candidate is shipped with `git archive` of the committed candidate instead of rsync,
+  so exactly the recorded commit is built and measured.
+- The baseline commit is stored in `experiments/<id>/baseline_commit`; `gate.sh` generates
+  `patch.diff`.
+- `build`, `test` and `perft` failures are `rejected`; `broken` is reserved for
+  protected-path violations and infrastructure failures. `result.json` carries a `reason`.
+- Elo and its error bar come from cutechess's own output; ordo is not used.
+- The cutechess command adds `proto=uci` and `-repeat` to the `elo-testing.md` recipe.
+- `tests/perft.rs` is new: the repo had no `tests/` directory and no perft in the library.
+- Ship and build of both candidate and baseline run under the same remote `flock` as the match,
+  ensuring builds never overlap a running SPRT. The cache is re-checked inside the lock, and
+  binaries are written atomically (to a temp file, then moved into place) after a smoke test
+  (`uci`/`uciok`). Binaries are keyed by commit prefix (12 hex) + config hash.
+- The match's exit status does not decide the outcome: `gate.sh` parses cutechess output to extract
+  the verdict; a parse error is `broken`, a nonzero exit with a parseable verdict is recorded in `reason`.
+- Per-run artifacts from previous runs (logs, JSON, PGN, etc.) are deleted at the start of each
+  `gate.sh` run to prevent stale files from standing in for new results or confusing manual inspection.
+- Experiment IDs are validated by regex; `gate.sh` runs ID validation early.
+- `result.py` is strict: a result is `accepted` only if preflight, build, test, and perft all passed
+  and SPRT returned `H1`. All arguments are validated.
+- Renames are caught by the protected-path check: `--no-renames` in `git diff` ensures a renamed
+  protected file is reported as touched.
+- `attempt.sh` symlinks the gitignored `bins/` directory (opening book) into each worktree so tests
+  can access it without copying.
