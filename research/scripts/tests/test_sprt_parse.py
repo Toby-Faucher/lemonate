@@ -21,6 +21,16 @@ class ParseTest(unittest.TestCase):
         self.assertAlmostEqual(r["elo_err"], 11.2)
         self.assertAlmostEqual(r["llr"], 2.97)
 
+    def test_real_cutechess_1_5_1_output(self):
+        # Captured from cutechess-cli 1.5.1: the accept line says "H1 was accepted" and the
+        # Elo line is "inf +/- nan" (one finished game).
+        r = sprt_parse.parse(fixture("real_cutechess_h1_was.txt"))
+        self.assertEqual(r["verdict"], "H1")
+        self.assertEqual(r["games"], 1)
+        self.assertIsNone(r["elo"])
+        self.assertIsNone(r["elo_err"])
+        self.assertAlmostEqual(r["llr"], 3.5)
+
     def test_h0(self):
         r = sprt_parse.parse(fixture("h0.txt"))
         self.assertEqual(r["verdict"], "H0")

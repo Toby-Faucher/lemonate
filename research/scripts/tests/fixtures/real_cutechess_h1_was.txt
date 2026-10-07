@@ -1,0 +1,25 @@
+Indexing opening suite...
+Started game 3 of 60 (new vs old)
+Started game 4 of 60 (old vs new)
+Started game 1 of 60 (new vs old)
+Started game 2 of 60 (old vs new)
+Finished game 3 (new vs old): 1-0 {White wins by adjudication}
+Score of new vs old: 1 - 0 - 0  [1.000] 1
+Finished game 1 (new vs old): * {No result}
+Score of new vs old: 1 - 0 - 0  [1.000] 1
+Finished game 4 (old vs new): * {No result}
+Score of new vs old: 1 - 0 - 0  [1.000] 1
+Finished game 2 (old vs new): * {No result}
+Score of new vs old: 1 - 0 - 0  [1.000] 1
+...      new playing White: 1 - 0 - 0  [1.000] 1
+...      White vs Black: 1 - 0 - 0  [1.000] 1
+Elo difference: inf +/- nan, LOS: 84.1 %, DrawRatio: 0.0 %
+SPRT: llr 3.5 (1743.9%), lbound -0.201, ubound 0.201 - H1 was accepted
+
+Player: new
+   "No result": 3
+   "Win: White wins by adjudication": 1
+Player: old
+   "Loss: White wins by adjudication": 1
+   "No result": 3
+Finished match
