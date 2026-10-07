@@ -32,7 +32,8 @@ Copied from the spec. Every task's requirements include these.
 4. `build`, `test` and `perft` failures give `rejected` (the candidate is bad). `broken` is reserved for protected-path violations and infrastructure failures (SSH, remote build, unparseable output). `result.json` gets a `reason` string.
 5. Elo and error bar come from cutechess's own output; ordo is not used.
 6. The cutechess command adds `proto=uci` and `-repeat` (each opening played with colours swapped) to the recipe in `mds/elo-testing.md`.
-7. A new `tests/perft.rs` is added, because the repo has no `tests/` directory and no perft in the library (only a private copy in `benches/perft.rs`).
+7. `attempt.sh` symlinks the gitignored `bins/` directory into each worktree; without it the 4 book tests fail in every attempt and the `test` stage rejects everything. (Found when the baseline test run in a fresh worktree failed.)
+8. A new `tests/perft.rs` is added, because the repo has no `tests/` directory and no perft in the library (only a private copy in `benches/perft.rs`).
 
 ## Preconditions
 
@@ -982,7 +983,8 @@ echo 'fn main() {}' > "$repo/src/main.rs"
 echo '// t' > "$repo/tests/t.rs"
 touch "$R/experiments/.gitkeep"
 cp -r "$REAL_RESEARCH/scripts" "$REAL_RESEARCH/agent-prompt.md" "$R/"
-printf '/.worktrees\n' > "$repo/.gitignore"
+printf '/.worktrees\n/bins\n' > "$repo/.gitignore"
+mkdir "$repo/bins"; echo book > "$repo/bins/book.bin"
 write_config "$R/config.toml" "true"
 git -C "$repo" add -A
 git -C "$repo" commit -q -m base
@@ -1001,6 +1003,8 @@ base=$(git -C "$repo" rev-parse main)
 out=$("$R/scripts/attempt.sh" 0001-demo)
 assert_eq "$(<"$R/experiments/0001-demo/baseline_commit")" "$base" "baseline_commit"
 [[ -d "$repo/.worktrees/0001-demo/src" ]] || fail "worktree missing"
+[[ -L "$repo/.worktrees/0001-demo/bins" ]] || fail "bins/ should be symlinked into the worktree"
+assert_eq "$(git -C "$repo/.worktrees/0001-demo" status --porcelain)" "" "symlinked bins must not dirty the worktree"
 assert_eq "$(git -C "$repo/.worktrees/0001-demo" branch --show-current)" "exp/0001-demo" "branch"
 assert_eq "$(git -C "$repo/.worktrees/0001-demo" rev-parse HEAD)" "$base" "worktree at baseline"
 grep -q '^# <one-line hypothesis>' "$R/experiments/0001-demo/hypothesis.md" || fail "hypothesis stub"
@@ -1092,6 +1096,8 @@ wt="$WORKTREES/$id"
 baseline=$(git -C "$REPO_ROOT" rev-parse "$(cfg repo.baseline_branch)")
 mkdir -p "$exp" "$WORKTREES"
 git -C "$REPO_ROOT" worktree add -q -b "exp/$id" "$wt" "$baseline"
+# Gitignored assets that tests need (bins/Perfect2021.bin) are absent from a fresh worktree.
+[[ -d $REPO_ROOT/bins ]] && ln -s "$REPO_ROOT/bins" "$wt/bins"
 echo "$baseline" > "$exp/baseline_commit"
 cat > "$exp/hypothesis.md" <<'EOF'
 # <one-line hypothesis>
