@@ -172,4 +172,32 @@ git -C "$repo/.worktrees/0018-utf" commit -qm "utf8 test file"
 FAKE_CUTECHESS_OUTPUT="$HERE/fixtures/h1.txt" "$R/scripts/gate.sh" 0018-utf >/dev/null
 assert_eq "$(status_of 0018-utf)" "broken" "non-ASCII protected path -> broken"
 
+# Integrity: the candidate is the baseline plus only the attempt's own linear commits.
+move_main() { echo "// main $1" >> "$repo/src/main.rs"; git -C "$repo" commit -qam "main $1"; }
+gate_h1() { FAKE_CUTECHESS_OUTPUT="$HERE/fixtures/h1.txt" "$R/scripts/gate.sh" "$1" >/dev/null; }
+
+"$R/scripts/attempt.sh" 0019-merge >/dev/null
+move_main one
+git -C "$repo/.worktrees/0019-merge" -c user.email=t@example.com -c user.name=t merge -q --no-ff --no-edit main
+gate_h1 0019-merge
+assert_eq "$(status_of 0019-merge)" "broken" "merge commit -> broken"
+assert_eq "$(jq -r .gate.preflight "$R/experiments/0019-merge/result.json")" "fail" "merge preflight"
+grep -q 'merge commits' "$R/experiments/0019-merge/result.json" || fail "reason should mention merge commits"
+
+"$R/scripts/attempt.sh" 0020-ff >/dev/null
+move_main two
+git -C "$repo/.worktrees/0020-ff" merge -q --ff-only main
+gate_h1 0020-ff
+assert_eq "$(status_of 0020-ff)" "broken" "fast-forwarded to main -> broken"
+assert_eq "$(jq -r .gate.preflight "$R/experiments/0020-ff/result.json")" "fail" "ff preflight"
+grep -q 'already on' "$R/experiments/0020-ff/result.json" || fail "reason should mention commits already on the baseline branch"
+
+# False-positive guard: main moved, but the attempt has its own linear commit on the old baseline.
+"$R/scripts/attempt.sh" 0021-own >/dev/null
+move_main three
+echo '// my change' >> "$repo/.worktrees/0021-own/src/main.rs"
+git -C "$repo/.worktrees/0021-own" commit -qam "own change"
+gate_h1 0021-own
+assert_eq "$(status_of 0021-own)" "accepted" "own linear commit with moved main -> accepted"
+
 echo "test_gate: OK"

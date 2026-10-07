@@ -56,6 +56,14 @@ branch_tip=$(git -C "$REPO_ROOT" rev-parse --verify "$baseline_branch" 2>/dev/nu
   || preflight_fail "baseline branch '$baseline_branch' does not resolve"
 git -C "$REPO_ROOT" merge-base --is-ancestor "$baseline" "$branch_tip" \
   || preflight_fail "ancestry: recorded baseline $b12 is not on branch $baseline_branch"
+merges=$(git -C "$REPO_ROOT" rev-list --merges "$baseline..$candidate") \
+  || preflight_fail "could not list commits $b12..$c12"
+[[ -z $merges ]] || preflight_fail "candidate contains merge commits (merged another branch?)"
+range_all=$(git -C "$REPO_ROOT" rev-list "$baseline..$candidate") \
+  || preflight_fail "could not list commits $b12..$c12"
+range_own=$(git -C "$REPO_ROOT" rev-list "$baseline..$candidate" "^$branch_tip") \
+  || preflight_fail "could not list commits $b12..$c12"
+[[ $range_all == "$range_own" ]] || preflight_fail "candidate contains commits already on $baseline_branch (rebased or fast-forwarded onto it?)"
 bad=$(touched_protected "$baseline" "$candidate") \
   || preflight_fail "could not compute diff $b12..$c12 for the protected-path check"
 if [[ -n $bad ]]; then

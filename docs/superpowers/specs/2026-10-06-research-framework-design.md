@@ -192,3 +192,6 @@ Decisions made while writing the plan, from reading the code:
   ("unreadable result.json") instead of crashing, and `CATALOG.md` is written atomically.
 - Known limitation: the protected paths do not cover Cargo/`.cargo` files (`Cargo.toml`, `.cargo/config.toml`,
   `build.rs`, `rust-toolchain*`); see `research/README.md`, Known limitations.
+- Preflight also requires the candidate to be the baseline plus only the attempt's own linear commits:
+  no merge commits in `baseline..candidate`, and no commit in that range already reachable from the baseline
+  branch tip (catches merging, fast-forwarding or rebasing onto a moved `main`). An empty range still passes.
