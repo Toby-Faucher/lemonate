@@ -79,7 +79,8 @@ Where this section differs from the implementation (rsync vs git archive, ordo, 
 Stages run in order and stop at the first failure.
 
 1. **Preflight (local).** Branch exists; its diff touches none of the protected paths
-   (`research/scripts/`, `research/config.toml`, `tests/`, and `lean/` once it exists).
+   (`research/scripts/`, `research/config.toml`, `tests/`, `lean/` once it exists, and the Cargo/toolchain
+   files `Cargo.toml`, `Cargo.lock`, `build.rs`, `.cargo/`, `rust-toolchain*`; see Implementation notes).
    A violation records `broken` and stops, so an attempt cannot weaken its own verifier.
 2. **Build (local).** `cargo build --release` with the flags from `CLAUDE.md`
    (`target-cpu=native`, BMI2, POPCNT). Build errors fail; warnings do not.
@@ -190,8 +191,12 @@ Decisions made while writing the plan, from reading the code:
   commit prefix and config hash.
 - The catalog is robust: a malformed or unreadable `result.json` renders that experiment as `broken`
   ("unreadable result.json") instead of crashing, and `CATALOG.md` is written atomically.
-- Known limitation: the protected paths do not cover Cargo/`.cargo` files (`Cargo.toml`, `.cargo/config.toml`,
-  `build.rs`, `rust-toolchain*`); see `research/README.md`, Known limitations.
+- The protected paths were widened after the final review, with the user's approval, to also cover
+  `Cargo.toml`, `Cargo.lock`, `build.rs`, `.cargo/` and `rust-toolchain*` (repo-root prefixes): a
+  `.cargo/config.toml` `[target.*] runner` override, a `[[test]]` redirect or a `build.rs` could otherwise
+  switch off or redirect the build/test/perft stages. Consequence: attempts cannot change release-profile
+  settings in `Cargo.toml`; tune those by hand. Remaining limitation: code under `src/` that runs at build
+  or test time is unrestricted; see `research/README.md`, Known limitations.
 - Preflight also requires the candidate to be the baseline plus only the attempt's own linear commits:
   no merge commits in `baseline..candidate`, and no commit in that range already reachable from the baseline
   branch tip (catches merging, fast-forwarding or rebasing onto a moved `main`). An empty range still passes.

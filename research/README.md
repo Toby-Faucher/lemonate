@@ -28,7 +28,7 @@ Python >= 3.11 (`tomllib`), `jq`, `git`, `bash` and `ssh`.
 
 ## What the gate checks
 
-1. **preflight**: the recorded baseline must be a full commit sha that exists, is an ancestor of the candidate and is an ancestor of the baseline branch (`repo.baseline_branch`); the candidate must be the baseline plus only the attempt's own linear commits (no merge commits, no commits already on the baseline branch); then the diff must not touch `research/scripts/`, `research/config.toml`, `tests/` or `lean/`. The protected-path check is fail-closed (if git cannot compute the diff the result is `broken`) and NUL-safe (non-ASCII paths are not missed).
+1. **preflight**: the recorded baseline must be a full commit sha that exists, is an ancestor of the candidate and is an ancestor of the baseline branch (`repo.baseline_branch`); the candidate must be the baseline plus only the attempt's own linear commits (no merge commits, no commits already on the baseline branch); then the diff must not touch `research/scripts/`, `research/config.toml`, `tests/`, `lean/`, `Cargo.toml`, `Cargo.lock`, `build.rs`, `.cargo/` or `rust-toolchain*` (repo-root paths; `src/build.rs` is an ordinary engine file). The protected-path check is fail-closed (if git cannot compute the diff the result is `broken`) and NUL-safe (non-ASCII paths are not missed).
 2. **build**: `gate.build_cmd` in the candidate worktree.
 3. **test** and **perft**: `cargo test` and `tests/perft.rs`.
 4. **ship**: the committed candidate and the baseline are sent to the container with `git archive` and built there. The candidate and baseline are built under the same remote `flock` as the match (so builds never overlap a running SPRT), re-check the cache inside the lock, and the binary is smoke-tested with a `uci`/`uciok` exchange and moved into place atomically (tmp then mv). Binaries are cached by commit prefix (12 hex) + config hash and a hash of the container's `rustc -vV` output, named `base-<b12>-<cfgh>-<tc>` and `cand-<c12>-<cfgh>-<tc>`, so a toolchain update never mixes old and new binaries.
@@ -64,12 +64,12 @@ status are unverified until the self-tests in the plan's Task 9 are run.
 - The gate measures the committed HEAD of the worktree, but local build/test/perft run in
   the live worktree; editing the worktree while a gate is running can make the local
   stages and the match see different trees.
-- The protected-path list does not cover everything that can influence the verifier:
-  an attempt could change `Cargo.toml` (for example redirect the `perft` test target)
-  or `.cargo/config.toml` (a `[target.*] runner` override can make `cargo test` pass without
-  running any tests), or add a `build.rs`, which runs on the container. Consider protecting
-  `.cargo/`, `Cargo.toml`, `Cargo.lock`, `build.rs` and `rust-toolchain*`, and running container
-  builds as an unprivileged user.
+- Cargo/toolchain files are protected, so an attempt cannot edit `Cargo.toml` (including the
+  release profile; tune those by hand), `.cargo/config.toml`, `build.rs` or `rust-toolchain*`.
+  Code under `src/` is not restricted, and anything in it that runs at build or test time
+  (for example a `#[test]`) still runs with your permissions locally and as root on the
+  container. Consider running container builds as an unprivileged user that cannot write to
+  `remote.engines_dir`.
 - The games PGN pull is best effort: a failed pull leaves an empty `games.pgn` without
   a recorded reason; it does not affect the verdict.
 - `flock` waits have no timeout.

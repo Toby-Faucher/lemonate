@@ -7,7 +7,7 @@ You are attempting one engine-improvement hypothesis for the lemonate chess engi
 
 Rules:
 
-1. Edit files under `src/` only. Do not touch `tests/`, `research/` or `lean/`; changes there make the attempt `broken`.
+1. Edit files under `src/` only. Do not touch `tests/`, `research/`, `lean/`, `Cargo.toml`, `Cargo.lock`, `build.rs`, `.cargo/` or `rust-toolchain*`; changes there make the attempt `broken`.
 2. While iterating, run `cargo test --release --lib --bins`. That is the only verification you run.
 3. Do not run `research/scripts/gate.sh`, cutechess, or any engine-vs-engine match. The gate is run by someone else, so you cannot tune the patch against its results.
 4. Commit your work on branch `exp/{{ID}}`. The gate measures the committed HEAD and refuses uncommitted changes.

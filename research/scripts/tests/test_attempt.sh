@@ -38,6 +38,33 @@ git -C "$repo" commit -qm "utf8"
 assert_eq "$(touched_protected main utf-test)" "tests/é.rs" "non-ASCII protected path is flagged"
 git -C "$repo" checkout -q main
 
+# Cargo/toolchain files can switch off or redirect the verifier (runner override, [[test]] redirect,
+# build.rs), so they are protected too, at the repo root only.
+git -C "$repo" checkout -q -b cargo-test
+mkdir -p "$repo/.cargo"
+echo '[target.x86_64-unknown-linux-gnu]' > "$repo/.cargo/config.toml"
+echo '[package]' > "$repo/Cargo.toml"
+echo '# lock' > "$repo/Cargo.lock"
+echo 'fn main() {}' > "$repo/build.rs"
+echo 'stable' > "$repo/rust-toolchain"
+echo '[toolchain]' > "$repo/rust-toolchain.toml"
+git -C "$repo" add .cargo Cargo.toml Cargo.lock build.rs rust-toolchain rust-toolchain.toml
+git -C "$repo" commit -qm "cargo files"
+assert_eq "$(touched_protected main cargo-test)" \
+  $'.cargo/config.toml\nCargo.lock\nCargo.toml\nbuild.rs\nrust-toolchain\nrust-toolchain.toml' \
+  "Cargo/toolchain files are flagged"
+git -C "$repo" checkout -q main
+
+# Look-alikes below src/ are ordinary engine files, not protected.
+git -C "$repo" checkout -q -b lookalike-test
+echo 'fn main() {}' > "$repo/src/build.rs"
+mkdir -p "$repo/src/.cargo"
+echo x > "$repo/src/.cargo/note.txt"
+git -C "$repo" add src
+git -C "$repo" commit -qm "lookalikes under src/"
+assert_eq "$(touched_protected main lookalike-test)" "" "src/build.rs and src/.cargo are not protected"
+git -C "$repo" checkout -q main
+
 # attempt.sh makes the experiment visible in the catalog right away.
 grep -q '0001-demo' "$R/CATALOG.md" || fail "attempt.sh should add a pending catalog row"
 grep -q 'Pending' "$R/CATALOG.md" || fail "pending section missing"

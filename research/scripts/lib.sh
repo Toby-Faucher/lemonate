@@ -8,7 +8,11 @@ SCRIPTS="$RESEARCH_DIR/scripts"
 EXP_DIR="$RESEARCH_DIR/experiments"
 WORKTREES="$REPO_ROOT/.worktrees"
 
-PROTECTED_PATHS=("research/scripts/" "research/config.toml" "tests/" "lean/")
+# Prefixes are matched at the repo root. The Cargo/toolchain entries stop an attempt from switching
+# off or redirecting the verifier (a `.cargo/config.toml` runner override, a `[[test]]` redirect in
+# Cargo.toml, a build.rs); `rust-toolchain` also covers `rust-toolchain.toml`.
+PROTECTED_PATHS=("research/scripts/" "research/config.toml" "tests/" "lean/"
+                 ".cargo/" "Cargo.toml" "Cargo.lock" "build.rs" "rust-toolchain")
 
 die() { echo "error: $*" >&2; exit 1; }
 

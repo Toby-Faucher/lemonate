@@ -172,6 +172,18 @@ git -C "$repo/.worktrees/0018-utf" commit -qm "utf8 test file"
 FAKE_CUTECHESS_OUTPUT="$HERE/fixtures/h1.txt" "$R/scripts/gate.sh" 0018-utf >/dev/null
 assert_eq "$(status_of 0018-utf)" "broken" "non-ASCII protected path -> broken"
 
+# A .cargo/config.toml test runner override would make build/test/perft "pass" without running
+# anything, so touching it is a preflight violation.
+"$R/scripts/attempt.sh" 0021-cargo >/dev/null
+mkdir -p "$repo/.worktrees/0021-cargo/.cargo"
+printf '[target.x86_64-unknown-linux-gnu]\nrunner = "true"\n' > "$repo/.worktrees/0021-cargo/.cargo/config.toml"
+git -C "$repo/.worktrees/0021-cargo" add -A
+git -C "$repo/.worktrees/0021-cargo" commit -qm "fake test runner"
+FAKE_CUTECHESS_OUTPUT="$HERE/fixtures/h1.txt" "$R/scripts/gate.sh" 0021-cargo >/dev/null
+assert_eq "$(status_of 0021-cargo)" "broken" "cargo runner override -> broken"
+assert_eq "$(jq -r .gate.preflight "$R/experiments/0021-cargo/result.json")" "fail" "cargo override preflight"
+jq -r .reason "$R/experiments/0021-cargo/result.json" | grep -q '.cargo/config.toml' || fail "reason should name .cargo/config.toml"
+
 # Integrity: the candidate is the baseline plus only the attempt's own linear commits.
 move_main() { echo "// main $1" >> "$repo/src/main.rs"; git -C "$repo" commit -qam "main $1"; }
 gate_h1() { FAKE_CUTECHESS_OUTPUT="$HERE/fixtures/h1.txt" "$R/scripts/gate.sh" "$1" >/dev/null; }
