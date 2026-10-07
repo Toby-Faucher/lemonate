@@ -16,3 +16,5 @@ Rules:
    - `## Tried`: what you tried, in order
    - `## Dropped`: ideas you discarded and the reason
    - `## Surprises`: anything unexpected in the code or behaviour
+6. Do not rebase, merge or cherry-pick `main` or any other branch into your branch. The gate rejects branches that do not descend from the recorded baseline.
+7. In `{{EXPERIMENT}}/` write only `hypothesis.md` and `trace.md`. Never write `result.json`, `baseline_commit` or any other file there.

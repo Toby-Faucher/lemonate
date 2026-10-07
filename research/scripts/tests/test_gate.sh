@@ -10,6 +10,7 @@ shift
 cmd="$*"
 [[ -z ${FAKE_SSH_LOG:-} ]] || printf '%s\n' "$cmd" >> "$FAKE_SSH_LOG"
 case "$cmd" in
+  *"rustc -vV"*)   [[ -n ${FAKE_RUSTC_EMPTY:-} ]] || echo "rustc 1.99.0-fake" ;;
   *cutechess-cli*) cat "$FAKE_CUTECHESS_OUTPUT"; exit "${FAKE_CUTECHESS_RC:-0}" ;;
   "test -x"*)      [[ -n ${FAKE_TEST_X_HIT:-} ]] ;;
   "cat "*)         echo '[Event "fake"]' ;;
@@ -47,7 +48,14 @@ grep -q 'name=new.*name=old' <<<"$match_cmd" || fail "candidate must be listed f
 ship_lines=$(grep -E "$SHIP_RE" "$log")
 assert_eq "$(wc -l <<<"$ship_lines")" "2" "baseline and candidate both shipped"
 assert_eq "$(grep -vc flock <<<"$ship_lines" || true)" "0" "every ship+build runs under flock"
-grep -qF "$(python3 "$R/scripts/cfg.py" hash)" <<<"$match_cmd" || fail "binary names should carry the config hash"
+tc=$(echo "rustc 1.99.0-fake" | sha256sum | cut -c1-12)
+cfgh=$(python3 "$R/scripts/cfg.py" hash)
+grep -qF "cand-$(git -C "$repo" rev-parse --short=12 main)-$cfgh-$tc" <<<"$match_cmd" || fail "candidate name should carry config hash and toolchain hash"
+grep -qF -- "-$cfgh-$tc" <<<"$match_cmd" || fail "binary names should carry the config hash and toolchain hash"
+grep -qF -- "base-" <<<"$(grep -F 'test -x' "$log")" || fail "outer cache check missing"
+grep -qF -- "-$cfgh-$tc" <<<"$(grep -F 'test -x' "$log")" || fail "outer cache check should use the keyed name"
+grep -qF -- "-$cfgh-$tc" <<<"$ship_lines" || fail "build script should use the keyed names"
+grep -q 'empty diff' "$R/experiments/0001-h1/result.json" || fail "empty-diff reason missing"
 
 run_case 0002-h0 h0.txt
 assert_eq "$(status_of 0002-h0)" "rejected" "H0 -> rejected"
@@ -120,5 +128,48 @@ grep -q 'exited 3' "$R/experiments/0010-rc/result.json" || fail "reason should m
 "$R/scripts/attempt.sh" 0011-rcgarbage >/dev/null
 FAKE_CUTECHESS_RC=3 FAKE_CUTECHESS_OUTPUT="$tmp/garbage.txt" "$R/scripts/gate.sh" 0011-rcgarbage >/dev/null
 assert_eq "$(status_of 0011-rcgarbage)" "broken" "non-zero exit with garbage -> broken"
+
+# Toolchain probe failing (empty output) is an infrastructure failure.
+"$R/scripts/attempt.sh" 0012-notc >/dev/null
+FAKE_RUSTC_EMPTY=1 FAKE_CUTECHESS_OUTPUT="$HERE/fixtures/h1.txt" "$R/scripts/gate.sh" 0012-notc >/dev/null
+assert_eq "$(status_of 0012-notc)" "broken" "empty rustc -vV -> broken"
+
+# Integrity: a tampered or unusable baseline_commit records broken (never aborts).
+"$R/scripts/attempt.sh" 0013-badhex >/dev/null
+echo "notahex" > "$R/experiments/0013-badhex/baseline_commit"
+FAKE_CUTECHESS_OUTPUT="$HERE/fixtures/h1.txt" "$R/scripts/gate.sh" 0013-badhex >/dev/null
+assert_eq "$(status_of 0013-badhex)" "broken" "non-hex baseline -> broken"
+assert_eq "$(jq -r .gate.preflight "$R/experiments/0013-badhex/result.json")" "fail" "non-hex baseline preflight"
+"$R/scripts/attempt.sh" 0014-nosuch >/dev/null
+printf 'a%.0s' {1..40} > "$R/experiments/0014-nosuch/baseline_commit"
+FAKE_CUTECHESS_OUTPUT="$HERE/fixtures/h1.txt" "$R/scripts/gate.sh" 0014-nosuch >/dev/null
+assert_eq "$(status_of 0014-nosuch)" "broken" "unresolvable baseline -> broken"
+assert_eq "$(jq -r .gate.preflight "$R/experiments/0014-nosuch/result.json")" "fail" "unresolvable baseline preflight"
+
+# Integrity: a baseline that is not on the baseline branch is refused.
+"$R/scripts/attempt.sh" 0015-side >/dev/null
+side=$(git -C "$repo" commit-tree "main^{tree}" -p main -m side)
+git -C "$repo/.worktrees/0015-side" reset -q --hard "$side"
+echo "$side" > "$R/experiments/0015-side/baseline_commit"
+FAKE_CUTECHESS_OUTPUT="$HERE/fixtures/h1.txt" "$R/scripts/gate.sh" 0015-side >/dev/null
+assert_eq "$(status_of 0015-side)" "broken" "baseline off the baseline branch -> broken"
+grep -q 'ancestry' "$R/experiments/0015-side/result.json" || fail "reason should mention ancestry"
+
+# Integrity: a candidate that does not descend from the recorded baseline is refused.
+"$R/scripts/attempt.sh" 0016-anc >/dev/null
+orphan=$(git -C "$repo" commit-tree "main^{tree}" -m orphan)
+git -C "$repo/.worktrees/0016-anc" reset -q --hard "$orphan"
+FAKE_CUTECHESS_OUTPUT="$HERE/fixtures/h1.txt" "$R/scripts/gate.sh" 0016-anc >/dev/null
+assert_eq "$(status_of 0016-anc)" "broken" "non-descendant candidate -> broken"
+assert_eq "$(jq -r .gate.preflight "$R/experiments/0016-anc/result.json")" "fail" "non-descendant preflight"
+grep -q 'ancestry' "$R/experiments/0016-anc/result.json" || fail "reason should mention ancestry"
+
+# Non-ASCII protected path is not bypassed by git's path quoting.
+"$R/scripts/attempt.sh" 0018-utf >/dev/null
+echo '// x' > "$repo/.worktrees/0018-utf/tests/é.rs"
+git -C "$repo/.worktrees/0018-utf" add -A
+git -C "$repo/.worktrees/0018-utf" commit -qm "utf8 test file"
+FAKE_CUTECHESS_OUTPUT="$HERE/fixtures/h1.txt" "$R/scripts/gate.sh" 0018-utf >/dev/null
+assert_eq "$(status_of 0018-utf)" "broken" "non-ASCII protected path -> broken"
 
 echo "test_gate: OK"

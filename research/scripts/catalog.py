@@ -2,24 +2,30 @@
 """Generate research/CATALOG.md from experiments/*/result.json."""
 import argparse
 import json
+import os
+import tempfile
 from pathlib import Path
 
 ORDER = ["accepted", "inconclusive", "rejected", "broken", "pending"]
 
 
+def _lines(path):
+    try:
+        return path.read_text(encoding="utf-8").splitlines()
+    except (OSError, ValueError):
+        return []
+
+
 def _title(path):
-    if path.exists():
-        for line in path.read_text().splitlines():
-            if line.startswith("# "):
-                return line[2:].strip()
+    for line in _lines(path):
+        if line.startswith("# "):
+            return line[2:].strip()
     return ""
 
 
 def _first_line_under(path, heading):
-    if not path.exists():
-        return ""
     capturing = False
-    for line in path.read_text().splitlines():
+    for line in _lines(path):
         if line.startswith("## "):
             capturing = line[3:].strip().lower() == heading.lower()
         elif capturing and line.strip():
@@ -30,9 +36,12 @@ def _first_line_under(path, heading):
 def _elo(sprt):
     if not sprt or sprt.get("elo") is None:
         return "n/a"
-    if sprt.get("elo_err") is None:
-        return f"{sprt['elo']:+.1f}"
-    return f"{sprt['elo']:+.1f} ± {sprt['elo_err']:.1f}"
+    try:
+        if sprt.get("elo_err") is None:
+            return f"{sprt['elo']:+.1f}"
+        return f"{sprt['elo']:+.1f} \u00b1 {sprt['elo_err']:.1f}"
+    except (TypeError, ValueError):
+        return "n/a"
 
 
 def _cell(text):
@@ -41,16 +50,28 @@ def _cell(text):
 
 def _load(exp):
     path = exp / "result.json"
-    result = json.loads(path.read_text()) if path.exists() else {}
-    sprt = result.get("sprt") or {}
+    result, unreadable = {}, False
+    if path.exists():
+        try:
+            result = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(result, dict):
+                raise ValueError("result.json is not an object")
+        except (OSError, ValueError):  # JSONDecodeError and UnicodeDecodeError are ValueErrors
+            result, unreadable = {}, True
+    sprt = result.get("sprt") if isinstance(result.get("sprt"), dict) else {}
+    summary = _first_line_under(exp / "trace.md", "Summary")
+    if unreadable:
+        note = "unreadable result.json"
+    else:
+        note = " \u2014 ".join(x for x in (result.get("reason"), summary) if x)
     return {
         "id": exp.name,
-        "status": result.get("status", "pending"),
+        "status": "broken" if unreadable else result.get("status", "pending"),
         "title": _title(exp / "hypothesis.md"),
         "elo": _elo(sprt),
         "games": sprt.get("games", 0),
-        "baseline": (result.get("baseline_commit") or "")[:12],
-        "note": result.get("reason") or _first_line_under(exp / "trace.md", "Summary"),
+        "baseline": str(result.get("baseline_commit") or "")[:12],
+        "note": note,
     }
 
 
@@ -84,7 +105,16 @@ def main(argv=None):
     p = argparse.ArgumentParser()
     p.add_argument("--root", default=str(Path(__file__).resolve().parent.parent))
     root = Path(p.parse_args(argv).root)
-    (root / "CATALOG.md").write_text(render(root))
+    text = render(root)
+    fd, tmp = tempfile.mkstemp(dir=root, prefix=".CATALOG.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, root / "CATALOG.md")
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
 
 
 if __name__ == "__main__":

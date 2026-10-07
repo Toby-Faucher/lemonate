@@ -181,3 +181,14 @@ Decisions made while writing the plan, from reading the code:
 - `attempt.sh` symlinks the gitignored `bins/` directory (containing `Perfect2021.bin`, the engine's
   Polyglot book used by unit tests, distinct from the cutechess opening suite `match.book`) into
   each worktree so tests can access it without copying.
+- The optional fast-screen stage from the config section is NOT implemented (deviation from the design).
+- Preflight checks baseline integrity: `baseline_commit` must be a full existing commit sha that is an
+  ancestor of the candidate and of the baseline branch; otherwise the result is `broken`.
+- The protected-path check is fail-closed (a git failure is `broken`, never a pass) and NUL-safe
+  (`-z`, `core.quotePath=false`), so non-ASCII paths cannot bypass it.
+- The binary cache key includes a hash of the container's `rustc -vV` output, in addition to the
+  commit prefix and config hash.
+- The catalog is robust: a malformed or unreadable `result.json` renders that experiment as `broken`
+  ("unreadable result.json") instead of crashing, and `CATALOG.md` is written atomically.
+- Known limitation: the protected paths do not cover Cargo/`.cargo` files (`Cargo.toml`, `.cargo/config.toml`,
+  `build.rs`, `rust-toolchain*`); see `research/README.md`, Known limitations.

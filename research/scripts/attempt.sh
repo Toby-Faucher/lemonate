@@ -24,6 +24,8 @@ cat > "$exp/hypothesis.md" <<'EOF'
 ## Expected Elo
 EOF
 
+"$SCRIPTS/catalog.sh" >/dev/null
+
 sed -e "s|{{ID}}|$id|g" \
     -e "s|{{WORKTREE}}|$wt|g" \
     -e "s|{{EXPERIMENT}}|$exp|g" \

@@ -27,4 +27,19 @@ source "$R/scripts/lib.sh"
 assert_eq "$(touched_protected main rename-test)" "tests/t.rs" "rename out of tests/ is flagged"
 git -C "$repo" checkout -q main
 
+# touched_protected fails closed on an unresolvable ref.
+if touched_protected main deadbeefdeadbeefdeadbeefdeadbeefdeadbeef >/dev/null 2>&1; then fail "bad ref should make touched_protected fail"; fi
+
+# Non-ASCII protected paths are reported verbatim, not git-quoted.
+git -C "$repo" checkout -q -b utf-test
+echo x > "$repo/tests/é.rs"
+git -C "$repo" add tests
+git -C "$repo" commit -qm "utf8"
+assert_eq "$(touched_protected main utf-test)" "tests/é.rs" "non-ASCII protected path is flagged"
+git -C "$repo" checkout -q main
+
+# attempt.sh makes the experiment visible in the catalog right away.
+grep -q '0001-demo' "$R/CATALOG.md" || fail "attempt.sh should add a pending catalog row"
+grep -q 'Pending' "$R/CATALOG.md" || fail "pending section missing"
+
 echo "test_attempt: OK"

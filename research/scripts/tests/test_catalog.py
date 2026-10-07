@@ -1,4 +1,6 @@
 import json
+import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -56,6 +58,33 @@ class CatalogTest(unittest.TestCase):
         out = catalog.render(self.root)
         self.assertNotIn("## Rejected", out)
         self.assertIn("## Proofs", out)
+
+    def test_malformed_result_is_rendered_broken(self):
+        make(self.root, "0001-a", "first", "accepted", 1.0, 1.0, 10)
+        (self.root / "experiments" / "0001-a" / "result.json").write_text("{not json")
+        out = catalog.render(self.root)
+        self.assertIn("## Broken (1)", out)
+        self.assertIn("unreadable result.json", out)
+
+    def test_reason_and_summary_both_shown(self):
+        make(self.root, "0001-a", "first", "rejected", -1.0, 1.0, 10, summary="tried X")
+        p = self.root / "experiments" / "0001-a" / "result.json"
+        data = json.loads(p.read_text())
+        data["reason"] = "SPRT verdict: H0"
+        p.write_text(json.dumps(data))
+        self.assertIn("SPRT verdict: H0 \u2014 tried X", catalog.render(self.root))
+
+    def test_atomic_write_leaves_no_temp_file(self):
+        make(self.root, "0001-a", "first", "accepted", 1.0, 1.0, 10)
+        catalog.main(["--root", str(self.root)])
+        self.assertEqual([p.name for p in self.root.iterdir() if p.is_file()], ["CATALOG.md"])
+
+    def test_utf8_output_under_c_locale(self):
+        make(self.root, "0001-a", "first", "accepted", 1.0, 1.0, 10)
+        script = Path(__file__).resolve().parent.parent / "catalog.py"
+        env = {"PATH": os.environ["PATH"], "LC_ALL": "C", "PYTHONUTF8": "0", "PYTHONCOERCECLOCALE": "0"}
+        subprocess.run([sys.executable, str(script), "--root", str(self.root)], check=True, env=env)
+        self.assertIn("\u00b1", (self.root / "CATALOG.md").read_bytes().decode("utf-8"))
 
     def test_main_writes_file(self):
         make(self.root, "0001-a", "first", "accepted", 1.0, 1.0, 10)

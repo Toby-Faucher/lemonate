@@ -19,8 +19,6 @@ candidate=$(git -C "$wt" rev-parse HEAD)
 b12=${baseline:0:12}
 c12=${candidate:0:12}
 cfgh=$(python3 "$SCRIPTS/cfg.py" hash)
-base_name="base-$b12-$cfgh"
-cand_name="cand-$c12-$cfgh"
 
 declare -A gate=([preflight]=skipped [build]=skipped [test]=skipped [perft]=skipped [sprt]=skipped)
 reason=""
@@ -29,7 +27,7 @@ sprt_file=""
 
 # record: write patch.diff and result.json, refresh the catalog, print the outcome.
 record() {
-  git -C "$wt" diff "$baseline" "$candidate" > "$exp/patch.diff"
+  git -C "$wt" diff "$baseline" "$candidate" > "$exp/patch.diff" 2>/dev/null || : > "$exp/patch.diff"
   local args=(--out "$exp/result.json" --baseline "$baseline" --candidate "$candidate"
               --config-hash "$cfgh")
   local s
@@ -43,11 +41,25 @@ record() {
 }
 
 # --- 1. Preflight: an attempt must not touch the verifier. ---
-bad=$(touched_protected "$baseline" "$candidate")
-if [[ -n $bad ]]; then
+preflight_fail() {
   gate[preflight]=fail
-  reason="touches protected paths: $(tr '\n' ' ' <<<"$bad")"
+  reason="$1"
   record; exit 0
+}
+baseline_branch=$(cfg repo.baseline_branch)
+[[ $baseline =~ ^[0-9a-f]{40}$ ]] || preflight_fail "baseline_commit is not a full commit sha"
+git -C "$REPO_ROOT" cat-file -e "$baseline^{commit}" 2>/dev/null \
+  || preflight_fail "baseline commit $b12 does not exist in the repository"
+git -C "$REPO_ROOT" merge-base --is-ancestor "$baseline" "$candidate" \
+  || preflight_fail "ancestry: candidate does not descend from the recorded baseline $b12"
+branch_tip=$(git -C "$REPO_ROOT" rev-parse --verify "$baseline_branch" 2>/dev/null) \
+  || preflight_fail "baseline branch '$baseline_branch' does not resolve"
+git -C "$REPO_ROOT" merge-base --is-ancestor "$baseline" "$branch_tip" \
+  || preflight_fail "ancestry: recorded baseline $b12 is not on branch $baseline_branch"
+bad=$(touched_protected "$baseline" "$candidate") \
+  || preflight_fail "could not compute diff $b12..$c12 for the protected-path check"
+if [[ -n $bad ]]; then
+  preflight_fail "touches protected paths: $(tr '\n' ' ' <<<"$bad")"
 fi
 gate[preflight]=pass
 
@@ -79,6 +91,13 @@ infra_fail() {
   reason="$1"
   record; exit 0
 }
+
+# The container's rustc identity is part of the cache key: a toolchain update invalidates binaries.
+rustc_info=$(ssh_ "$host" ". ~/.cargo/env; rustc -vV") || infra_fail "could not query rustc on $host"
+[[ -n ${rustc_info//[[:space:]]/} ]] || infra_fail "rustc -vV on $host returned nothing"
+tc=$(sha256sum <<<"$rustc_info" | cut -c1-12)
+base_name="base-$b12-$cfgh-$tc"
+cand_name="cand-$c12-$cfgh-$tc"
 
 # ship_and_build COMMIT NAME: ship the commit and build it into the engines dir, all under the
 # remote lock so a build never disturbs a running match. The cache is re-checked inside the lock;
@@ -129,4 +148,7 @@ case $verdict in
   *)  gate[sprt]=fail; reason="SPRT verdict: $verdict" ;;
 esac
 sprt_file="$exp/sprt.json"
+if [[ -z $reason ]] && git -C "$wt" diff --quiet "$baseline" "$candidate"; then
+  reason="empty diff (candidate equals baseline)"
+fi
 record
