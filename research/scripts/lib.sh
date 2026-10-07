@@ -17,7 +17,7 @@ cfg() { python3 "$SCRIPTS/cfg.py" get "$1"; }
 # touched_protected BASE HEAD: print changed paths under a protected prefix, one per line.
 touched_protected() {
   local changed p
-  changed=$(git -C "$REPO_ROOT" diff --name-only "$1" "$2")
+  changed=$(git -C "$REPO_ROOT" diff --no-renames --name-only "$1" "$2")
   for p in "${PROTECTED_PATHS[@]}"; do
     awk -v p="$p" 'index($0, p) == 1' <<<"$changed"
   done
