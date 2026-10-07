@@ -1,0 +1,25 @@
+[repo]
+baseline_branch = "main"
+
+[match]
+tc = "10+0.1"
+book = "/root/UHO_Lichess_4852_v1.epd"
+concurrency = 10
+game_cap = 4000
+
+[sprt]
+elo0 = 0
+elo1 = 5
+alpha = 0.05
+beta = 0.05
+
+[remote]
+host = "chess-test"
+workdir = "/root/research"
+engines_dir = "/root/engines"
+lock = "/root/research.lock"
+
+[gate]
+build_cmd = "RUSTFLAGS='-C target-cpu=native -C target-feature=+bmi2,+popcnt' cargo build --release"
+test_cmd = "cargo test --release --lib --bins"
+perft_cmd = "cargo test --release --test perft"

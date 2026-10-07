@@ -4,3 +4,6 @@ CLAUDE.md
 plan.md
 /bins
 /.worktrees
+/research/experiments/*/*.pgn
+/research/experiments/*/*.log
+/research/experiments/*/*.err
