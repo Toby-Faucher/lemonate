@@ -1,16 +1,19 @@
 #!/usr/bin/env bash
 source "$(dirname "${BASH_SOURCE[0]}")/flow_common.sh"
 
-# Fake ssh: ignores the host, answers by recognising the remote command.
+# Fake ssh: ignores the host, logs the remote command, answers by recognising it.
+# FAKE_SSH_LOG: file to append commands to. FAKE_TEST_X_HIT: make `test -x` succeed (cache hit).
+# FAKE_CUTECHESS_RC: exit status of the match, which still prints FAKE_CUTECHESS_OUTPUT.
 cat > "$tmp/fakessh" <<'EOF'
 #!/usr/bin/env bash
 shift
 cmd="$*"
+[[ -z ${FAKE_SSH_LOG:-} ]] || printf '%s\n' "$cmd" >> "$FAKE_SSH_LOG"
 case "$cmd" in
-  *cutechess-cli*) cat "$FAKE_CUTECHESS_OUTPUT" ;;
+  *cutechess-cli*) cat "$FAKE_CUTECHESS_OUTPUT"; exit "${FAKE_CUTECHESS_RC:-0}" ;;
+  "test -x"*)      [[ -n ${FAKE_TEST_X_HIT:-} ]] ;;
   "cat "*)         echo '[Event "fake"]' ;;
-  "test -x"*)      exit 1 ;;
-  *"tar -x"*)      cat > /dev/null ;;
+  *tar*-x*)        cat > /dev/null ;;
   *)               ;;
 esac
 EOF
@@ -18,10 +21,11 @@ chmod +x "$tmp/fakessh"
 export RESEARCH_SSH="$tmp/fakessh"
 
 status_of() { jq -r .status "$R/experiments/$1/result.json"; }
+SHIP_RE='tar.{1,2}-x'
 
 run_case() { # id fixture
   "$R/scripts/attempt.sh" "$1" >/dev/null
-  FAKE_CUTECHESS_OUTPUT="$HERE/fixtures/$2" "$R/scripts/gate.sh" "$1" >/dev/null
+  FAKE_SSH_LOG="$tmp/ssh-$1.log" FAKE_CUTECHESS_OUTPUT="$HERE/fixtures/$2" "$R/scripts/gate.sh" "$1" >/dev/null
 }
 
 run_case 0001-h1 h1.txt
@@ -31,6 +35,19 @@ assert_eq "$(jq -r .config_hash "$R/experiments/0001-h1/result.json")" "$(python
 [[ -f "$R/experiments/0001-h1/patch.diff" ]] || fail "patch.diff missing"
 [[ -f "$R/experiments/0001-h1/games.pgn" ]] || fail "games.pgn missing"
 grep -q '0001-h1' "$R/CATALOG.md" || fail "catalog not regenerated"
+
+# The match is issued under the remote lock with the expected cutechess arguments.
+log="$tmp/ssh-0001-h1.log"
+match_cmd=$(grep -F 'cutechess-cli' "$log")
+for want in 'flock' '-repeat' '-games 2' '-rounds 50' '-sprt elo0=0 elo1=5 alpha=0.05 beta=0.05' '-pgnout'; do
+  grep -qF -- "$want" <<<"$match_cmd" || fail "match command lacks '$want'"
+done
+grep -q 'name=new.*name=old' <<<"$match_cmd" || fail "candidate must be listed first (name=new before name=old)"
+# Both ship+build commands run under flock; binary names carry the config hash.
+ship_lines=$(grep -E "$SHIP_RE" "$log")
+assert_eq "$(wc -l <<<"$ship_lines")" "2" "baseline and candidate both shipped"
+assert_eq "$(grep -vc flock <<<"$ship_lines" || true)" "0" "every ship+build runs under flock"
+grep -qF "$(python3 "$R/scripts/cfg.py" hash)" <<<"$match_cmd" || fail "binary names should carry the config hash"
 
 run_case 0002-h0 h0.txt
 assert_eq "$(status_of 0002-h0)" "rejected" "H0 -> rejected"
@@ -69,5 +86,39 @@ if "$R/scripts/gate.sh" 0007-dirty >/dev/null 2>&1; then fail "dirty worktree sh
 
 # Unknown experiment.
 if "$R/scripts/gate.sh" 9999-none >/dev/null 2>&1; then fail "unknown id should fail"; fi
+
+# Invalid id is refused before anything reaches a remote command.
+if "$R/scripts/gate.sh" bad_id >/dev/null 2>&1; then fail "invalid id should fail"; fi
+
+# Cache hit: a cached baseline is not shipped again.
+"$R/scripts/attempt.sh" 0008-cached >/dev/null
+FAKE_TEST_X_HIT=1 FAKE_SSH_LOG="$tmp/ssh-0008.log" FAKE_CUTECHESS_OUTPUT="$HERE/fixtures/h1.txt" \
+  "$R/scripts/gate.sh" 0008-cached >/dev/null
+assert_eq "$(status_of 0008-cached)" "accepted" "cache hit still accepted"
+assert_eq "$(grep -cE "$SHIP_RE" "$tmp/ssh-0008.log")" "1" "only the candidate is shipped on a cache hit"
+if grep -E "$SHIP_RE" "$tmp/ssh-0008.log" | grep -q 'base-'; then fail "baseline shipped despite cache hit"; fi
+
+# Re-run safety: stale artefacts from an earlier run never survive into a new result.
+"$R/scripts/attempt.sh" 0009-rerun >/dev/null
+FAKE_CUTECHESS_OUTPUT="$HERE/fixtures/h1.txt" "$R/scripts/gate.sh" 0009-rerun >/dev/null
+assert_eq "$(status_of 0009-rerun)" "accepted" "first run accepted"
+RESEARCH_CONFIG="$tmp/config-badbuild.toml" FAKE_CUTECHESS_OUTPUT="$HERE/fixtures/h1.txt" \
+  "$R/scripts/gate.sh" 0009-rerun >/dev/null
+assert_eq "$(status_of 0009-rerun)" "rejected" "re-run with bad build -> rejected"
+assert_eq "$(jq -r .gate.build "$R/experiments/0009-rerun/result.json")" "fail" "re-run build failed"
+for f in sprt.json sprt.log games.pgn; do
+  [[ ! -e "$R/experiments/0009-rerun/$f" ]] || fail "stale $f survived a re-run"
+done
+
+# cutechess exits non-zero but printed a parseable result: verdict kept, exit code noted.
+"$R/scripts/attempt.sh" 0010-rc >/dev/null
+FAKE_CUTECHESS_RC=3 FAKE_CUTECHESS_OUTPUT="$HERE/fixtures/h1.txt" "$R/scripts/gate.sh" 0010-rc >/dev/null
+assert_eq "$(status_of 0010-rc)" "accepted" "non-zero exit with parseable H1 -> accepted"
+grep -q 'exited 3' "$R/experiments/0010-rc/result.json" || fail "reason should mention the exit code"
+
+# cutechess exits non-zero with garbage output: infrastructure failure.
+"$R/scripts/attempt.sh" 0011-rcgarbage >/dev/null
+FAKE_CUTECHESS_RC=3 FAKE_CUTECHESS_OUTPUT="$tmp/garbage.txt" "$R/scripts/gate.sh" 0011-rcgarbage >/dev/null
+assert_eq "$(status_of 0011-rcgarbage)" "broken" "non-zero exit with garbage -> broken"
 
 echo "test_gate: OK"

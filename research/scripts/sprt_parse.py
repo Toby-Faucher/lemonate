@@ -7,7 +7,7 @@ import sys
 
 SCORE = re.compile(r"Score of (\S+) vs (\S+): (\d+) - (\d+) - (\d+)")
 ELO = re.compile(r"Elo difference: (\S+) \+/- (\S+?),")
-SPRT = re.compile(r"^SPRT: llr (-?\d+(?:\.\d+)?)(?:.*? - (H[01]) accepted)?", re.M)
+SPRT = re.compile(r"^SPRT: llr (-?\d+(?:\.\d+)?)(?:.*? - (H[01])(?: was)? accepted)?", re.M)
 
 
 def _num(text):

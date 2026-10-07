@@ -31,6 +31,20 @@ class ParseTest(unittest.TestCase):
         self.assertEqual(r["verdict"], "inconclusive")
         self.assertEqual(r["games"], 4000)
 
+    def test_was_accepted_wording_h1(self):
+        text = (
+            "Score of new vs old: 10 - 2 - 3  [0.7] 15\n"
+            "SPRT: llr 2.99 (101.0%), lbound -2.94, ubound 2.94 - H1 was accepted\n"
+        )
+        self.assertEqual(sprt_parse.parse(text)["verdict"], "H1")
+
+    def test_was_accepted_wording_h0(self):
+        text = (
+            "Score of new vs old: 2 - 10 - 3  [0.3] 15\n"
+            "SPRT: llr -2.99 (101.0%), lbound -2.94, ubound 2.94 - H0 was accepted\n"
+        )
+        self.assertEqual(sprt_parse.parse(text)["verdict"], "H0")
+
     def test_last_progress_line_wins(self):
         text = (
             "Score of new vs old: 1 - 0 - 0  [1.0] 1\n"

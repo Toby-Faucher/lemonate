@@ -3,16 +3,24 @@
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 id=${1:-}
+[[ $id =~ ^[0-9]{4}-[a-z0-9]+(-[a-z0-9]+)*$ ]] || die "usage: gate.sh NNNN-slug (invalid id: '$id')"
 exp="$EXP_DIR/$id"
 wt="$WORKTREES/$id"
-[[ -n $id && -f $exp/baseline_commit ]] || die "usage: gate.sh <id> (no such experiment: '$id')"
+[[ -f $exp/baseline_commit ]] || die "usage: gate.sh <id> (no such experiment: '$id')"
 [[ -d $wt ]] || die "worktree $wt not found"
 [[ -z $(git -C "$wt" status --porcelain) ]] || die "worktree has uncommitted changes; commit them first"
+
+# Per-run artefacts from an earlier run must not sit beside (or stand in for) a new result.
+rm -f "$exp"/{result.json,patch.diff,sprt.log,sprt.json,sprt.err,parse.err,games.pgn} \
+      "$exp"/{build,test,perft}.log "$exp"/remote-build-*.log
 
 baseline=$(<"$exp/baseline_commit")
 candidate=$(git -C "$wt" rev-parse HEAD)
 b12=${baseline:0:12}
 c12=${candidate:0:12}
+cfgh=$(python3 "$SCRIPTS/cfg.py" hash)
+base_name="base-$b12-$cfgh"
+cand_name="cand-$c12-$cfgh"
 
 declare -A gate=([preflight]=skipped [build]=skipped [test]=skipped [perft]=skipped [sprt]=skipped)
 reason=""
@@ -23,7 +31,7 @@ sprt_file=""
 record() {
   git -C "$wt" diff "$baseline" "$candidate" > "$exp/patch.diff"
   local args=(--out "$exp/result.json" --baseline "$baseline" --candidate "$candidate"
-              --config-hash "$(python3 "$SCRIPTS/cfg.py" hash)")
+              --config-hash "$cfgh")
   local s
   for s in "${!gate[@]}"; do args+=(--gate "$s=${gate[$s]}"); done
   if [[ -n $sprt_file ]]; then args+=(--sprt-file "$sprt_file"); fi
@@ -72,40 +80,52 @@ infra_fail() {
   record; exit 0
 }
 
-ship_and_build() { # commit name
-  local dir="$work/$2"
+# ship_and_build COMMIT NAME: ship the commit and build it into the engines dir, all under the
+# remote lock so a build never disturbs a running match. The cache is re-checked inside the lock;
+# the binary is smoke-tested and moved into place atomically.
+ship_and_build() {
+  local dir="$work/$2" q_dir q_eng q_bin q_tmp script
+  printf -v q_dir '%q' "$dir"
+  printf -v q_eng '%q' "$engines"
+  printf -v q_bin '%q' "$engines/$2"
+  printf -v q_tmp '%q' "$engines/$2.tmp"
+  script="if [ -x $q_bin ]; then cat >/dev/null; exit 0; fi; "
+  script+="rm -rf $q_dir && mkdir -p $q_dir && tar -x -C $q_dir && . ~/.cargo/env && cd $q_dir && $build_cmd"
+  script+=" && mkdir -p $q_eng && cp target/release/lemonate $q_tmp"
+  script+=" && printf 'uci\\nquit\\n' | timeout 10 $q_tmp | grep -q uciok && mv -f $q_tmp $q_bin"
   git -C "$REPO_ROOT" archive "$1" \
-    | ssh_ "$host" "rm -rf '$dir' && mkdir -p '$dir' && tar -x -C '$dir'" \
-    || infra_fail "could not ship $2 to $host"
-  ssh_ "$host" ". ~/.cargo/env; cd '$dir' && $build_cmd && mkdir -p '$engines' && cp target/release/lemonate '$engines/$2'" \
+    | ssh_ "$host" "flock $(printf '%q' "$lock") bash -c $(printf '%q' "$script")" \
     >"$exp/remote-build-$2.log" 2>&1 \
-    || infra_fail "remote build of $2 failed (see remote-build-$2.log)"
+    || infra_fail "ship/build of $2 failed (see remote-build-$2.log)"
 }
 
-ssh_ "$host" "test -x '$engines/base-$b12'" || ship_and_build "$baseline" "base-$b12"
-ship_and_build "$candidate" "cand-$c12"
+ssh_ "$host" "test -x '$engines/$base_name'" || ship_and_build "$baseline" "$base_name"
+ship_and_build "$candidate" "$cand_name"
 
 # --- 5. SPRT on the container, one match at a time (flock). ---
 pgn="$work/$id.pgn"
 match="rm -f '$pgn'; flock '$lock' cutechess-cli \
-  -engine name=new cmd='$engines/cand-$c12' proto=uci \
-  -engine name=old cmd='$engines/base-$b12' proto=uci \
+  -engine name=new cmd='$engines/$cand_name' proto=uci \
+  -engine name=old cmd='$engines/$base_name' proto=uci \
   -each tc=$(cfg match.tc) -games 2 -repeat -rounds $(( $(cfg match.game_cap) / 2 )) \
   -concurrency $(cfg match.concurrency) \
   -openings file='$(cfg match.book)' format=epd order=random \
   -resign movecount=3 score=400 -draw movenumber=40 movecount=8 score=10 \
   -sprt elo0=$(cfg sprt.elo0) elo1=$(cfg sprt.elo1) alpha=$(cfg sprt.alpha) beta=$(cfg sprt.beta) \
   -pgnout '$pgn'"
-ssh_ "$host" ". ~/.cargo/env; $match" >"$exp/sprt.log" 2>"$exp/sprt.err" \
-  || infra_fail "remote match failed (see sprt.err)"
-python3 "$SCRIPTS/sprt_parse.py" <"$exp/sprt.log" >"$exp/sprt.json" 2>"$exp/sprt.err" \
-  || infra_fail "could not parse cutechess output (see sprt.log, sprt.err)"
+# The match's exit status does not decide the outcome: the parsed output does.
+rc=0
+ssh_ "$host" ". ~/.cargo/env; $match" >"$exp/sprt.log" 2>"$exp/sprt.err" || rc=$?
+if ! python3 "$SCRIPTS/sprt_parse.py" <"$exp/sprt.log" >"$exp/sprt.json" 2>"$exp/parse.err"; then
+  rm -f "$exp/sprt.json"
+  infra_fail "could not parse cutechess output; match exited $rc (see sprt.log, sprt.err, parse.err)"
+fi
 ssh_ "$host" "cat '$pgn'" >"$exp/games.pgn" 2>/dev/null || true
 
 # --- 6. Record. ---
 verdict=$(jq -r .verdict "$exp/sprt.json")
 case $verdict in
-  H1) gate[sprt]=pass ;;
+  H1) gate[sprt]=pass; (( rc == 0 )) || reason="match exited $rc" ;;
   *)  gate[sprt]=fail; reason="SPRT verdict: $verdict" ;;
 esac
 sprt_file="$exp/sprt.json"
