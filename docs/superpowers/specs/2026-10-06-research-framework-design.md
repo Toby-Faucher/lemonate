@@ -74,6 +74,8 @@ baseline moves to the new `main`; each result keeps the commit it was measured a
 
 ## The gate (`gate.sh <id>`)
 
+Where this section differs from the implementation (rsync vs git archive, ordo, cache keying, lock scope), the "Implementation notes" section at the end governs.
+
 Stages run in order and stop at the first failure.
 
 1. **Preflight (local).** Branch exists; its diff touches none of the protected paths
@@ -176,5 +178,6 @@ Decisions made while writing the plan, from reading the code:
   and SPRT returned `H1`. All arguments are validated.
 - Renames are caught by the protected-path check: `--no-renames` in `git diff` ensures a renamed
   protected file is reported as touched.
-- `attempt.sh` symlinks the gitignored `bins/` directory (opening book) into each worktree so tests
-  can access it without copying.
+- `attempt.sh` symlinks the gitignored `bins/` directory (containing `Perfect2021.bin`, the engine's
+  Polyglot book used by unit tests, distinct from the cutechess opening suite `match.book`) into
+  each worktree so tests can access it without copying.

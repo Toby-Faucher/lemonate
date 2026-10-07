@@ -47,12 +47,13 @@ the commit it was measured against.
 ## Container prerequisites
 
 `config.toml` `[remote]` points at an SSH alias (default `chess-test`) for the
-container described in `mds/elo-testing.md`. It needs a Rust toolchain
-(`~/.cargo/env`), bash, `cutechess-cli`, `flock`, `timeout`, and `tar` on `PATH`,
-and the book at `match.book`. On the first real run, check the output against
-`sprt.log`: the parser accepts both `H1 accepted` and `H1 was accepted`, but
-the exact cutechess output format and exit status are unverified until the self-tests
-in the plan's Task 9 are run.
+test container. The container must have: a Rust toolchain (`~/.cargo/env` set up
+and cargo/rustup installed), bash, `cutechess-cli`, `flock`, `timeout`, and `tar`
+on `PATH`, and the opening book at `match.book`. The container setup is described
+in an untracked `mds/elo-testing.md` file kept locally (not in the repo). On the
+first real run, check the output against `sprt.log`: the parser accepts both `H1
+accepted` and `H1 was accepted`, but the exact cutechess output format and exit
+status are unverified until the self-tests in the plan's Task 9 are run.
 
 ## Known limitations
 
