@@ -1,0 +1,9 @@
+Started game 1 of 2000 (new vs old)
+Finished game 1 (new vs old): 1-0 {White mates}
+Score of new vs old: 580 - 460 - 600  [0.537] 1640
+...      new playing White: 300 - 220 - 300  [0.549] 820
+...      new playing Black: 280 - 240 - 300  [0.524] 820
+...      White vs Black: 540 - 500 - 600  [0.512] 1640
+Elo difference: 25.9 +/- 11.2, LOS: 100.0 %, DrawRatio: 36.6 %
+SPRT: llr 2.97 (101.0%), lbound -2.94, ubound 2.94 - H1 accepted
+Finished match

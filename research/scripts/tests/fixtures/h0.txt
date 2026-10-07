@@ -1,0 +1,4 @@
+Score of new vs old: 410 - 560 - 530  [0.451] 1500
+Elo difference: -34.0 +/- 12.0, LOS: 0.0 %, DrawRatio: 35.3 %
+SPRT: llr -2.96 (-100.7%), lbound -2.94, ubound 2.94 - H0 accepted
+Finished match

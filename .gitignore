@@ -7,3 +7,4 @@ plan.md
 /research/experiments/*/*.pgn
 /research/experiments/*/*.log
 /research/experiments/*/*.err
+__pycache__/
