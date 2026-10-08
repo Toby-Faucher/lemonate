@@ -62,7 +62,7 @@ pub const NULL_MOVE_REDUCTION: i32 = 3;
 pub const NULL_MOVE_MIN_DEPTH: i32 = 3;
 
 /// Late move reduction thresholds.
-pub const LMR_FULL_DEPTH_MOVES: usize = 4;
+pub const LMR_FULL_DEPTH_MOVES: usize = 3;
 pub const LMR_REDUCTION_LIMIT: i32 = 3;
 
 /// Precomputed LMR table indexed by [depth][move_count].
