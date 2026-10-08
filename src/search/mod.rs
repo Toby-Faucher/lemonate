@@ -56,7 +56,7 @@ pub const INFINITY: i32 = MATE_SCORE + 1000;
 pub const MAX_DEPTH: u8 = 128;
 
 /// Null move reduction depth.
-pub const NULL_MOVE_REDUCTION: i32 = 3;
+pub const NULL_MOVE_REDUCTION: i32 = 2;
 
 /// Minimum depth for null move pruning.
 pub const NULL_MOVE_MIN_DEPTH: i32 = 3;
