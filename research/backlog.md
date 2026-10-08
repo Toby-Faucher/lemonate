@@ -4,7 +4,7 @@ One line per candidate hypothesis. Pick one, run `scripts/attempt.sh <id>`, and 
 `[x]` once its experiment has a result. Line numbers refer to `src/search/mod.rs` at the
 time of writing.
 
-- [ ] 0001-aspiration-windows: re-enable aspiration windows (disabled near line 408 as "TEMPORARILY DISABLED ... to debug queen blunder"); the blunder may have been fixed elsewhere
+- [x] 0001-aspiration-windows: re-enable aspiration windows (disabled near line 408 as "TEMPORARILY DISABLED ... to debug queen blunder"); the blunder may have been fixed elsewhere **Result: inconclusive, +8.9 ± 7.4 Elo (LOS 99.1%, LLR 2.25 of 2.94), 4000 games; promising, needs a longer confirmation run. Not merged.**
 - [ ] 0002-aspiration-narrow: shrink `ASPIRATION_WINDOW` from 50 to 25 (only meaningful once 0001 is settled)
 - [ ] 0003-null-move-reduction: lower `NULL_MOVE_REDUCTION` from 3 to 2, or change the `depth / 6` term in the null-move reduction
 - [ ] 0004-null-move-min-depth: lower `NULL_MOVE_MIN_DEPTH` from 3 to 2
