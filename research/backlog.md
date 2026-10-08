@@ -6,7 +6,7 @@ time of writing.
 
 - [x] 0001-aspiration-windows: re-enable aspiration windows (disabled near line 408 as "TEMPORARILY DISABLED ... to debug queen blunder"); the blunder may have been fixed elsewhere **Result: inconclusive, +8.9 ± 7.4 Elo (LOS 99.1%, LLR 2.25 of 2.94), 4000 games; promising, needs a longer confirmation run. Not merged.**
 - [ ] 0002-aspiration-narrow: shrink `ASPIRATION_WINDOW` from 50 to 25 (only meaningful once 0001 is settled)
-- [ ] 0003-null-move-reduction: lower `NULL_MOVE_REDUCTION` from 3 to 2, or change the `depth / 6` term in the null-move reduction
+- [x] 0003-null-move-reduction: lower `NULL_MOVE_REDUCTION` from 3 to 2, or change the `depth / 6` term in the null-move reduction **Result: inconclusive, +8.1 ± 7.6 Elo, 4000 games, LLR 1.83. Not merged.**
 - [ ] 0004-null-move-min-depth: lower `NULL_MOVE_MIN_DEPTH` from 3 to 2
 - [ ] 0005-lmr-full-depth: reduce `LMR_FULL_DEPTH_MOVES` from 4 to 3 so reductions start earlier
 - [ ] 0006-lmr-divisor: change the LMR table divisor (`ln(depth) * ln(move_count) / 2.0`) to 2.25
