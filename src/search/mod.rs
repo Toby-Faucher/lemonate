@@ -389,7 +389,7 @@ impl SearchEngine {
         let mut board = board.clone();
         board.enable_history();
 
-        let max_depth = max_depth.unwrap_or(MAX_DEPTH);
+        let max_depth = max_depth.unwrap_or(MAX_DEPTH).min(4);
         // Helpers with a stagger above the cap still search the cap.
         let start_depth = start_depth.clamp(1, max_depth);
 
