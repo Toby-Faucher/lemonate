@@ -1,0 +1,15 @@
+{
+  "baseline_commit": "3396a1e16868b1973a10779c4b26b46a72ba59cd",
+  "candidate_commit": "ef0d54268b8c26e1c31b3ac4ec6e3d0f8c526865",
+  "config_hash": "21efe424f3ca",
+  "gate": {
+    "preflight": "pass",
+    "build": "pass",
+    "test": "fail",
+    "perft": "skipped",
+    "sprt": "skipped"
+  },
+  "sprt": null,
+  "status": "rejected",
+  "reason": "test failed (see test.log)"
+}

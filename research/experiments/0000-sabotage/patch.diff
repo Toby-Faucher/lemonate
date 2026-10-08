@@ -1,0 +1,13 @@
+diff --git a/src/search/mod.rs b/src/search/mod.rs
+index 4d7dedb..4760452 100644
+--- a/src/search/mod.rs
++++ b/src/search/mod.rs
+@@ -59,7 +59,7 @@ pub const MAX_DEPTH: u8 = 128;
+ pub const NULL_MOVE_REDUCTION: i32 = 3;
+ 
+ /// Minimum depth for null move pruning.
+-pub const NULL_MOVE_MIN_DEPTH: i32 = 3;
++pub const NULL_MOVE_MIN_DEPTH: i32 = 99;
+ 
+ /// Late move reduction thresholds.
+ pub const LMR_FULL_DEPTH_MOVES: usize = 4;
