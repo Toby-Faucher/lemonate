@@ -85,6 +85,12 @@ static LMR_TABLE: once_cell::sync::Lazy<[[i32; 256]; 129]> =
 /// Futility pruning base margin (per depth).
 pub const FUTILITY_MARGIN_BASE: i32 = 150;
 
+/// Reverse futility pruning margin (per depth).
+pub const REVERSE_FUTILITY_MARGIN: i32 = 100;
+
+/// Maximum depth at which reverse futility pruning applies.
+pub const REVERSE_FUTILITY_MAX_DEPTH: i32 = 6;
+
 /// Aspiration window initial size.
 pub const ASPIRATION_WINDOW: i32 = 50;
 
@@ -585,6 +591,20 @@ impl SearchEngine {
         // Static evaluation for pruning decisions.
         let static_eval = self.evaluator.evaluate(board);
         let in_check = board.is_in_check();
+
+        // Reverse futility pruning: static eval far above beta at shallow depth.
+        if !is_pv
+            && !in_check
+            && depth >= 1
+            && depth <= REVERSE_FUTILITY_MAX_DEPTH
+            && beta.abs() < MATE_SCORE - MAX_DEPTH as i32
+            && self.can_null_move(board, ply)
+        {
+            let margin = REVERSE_FUTILITY_MARGIN * depth;
+            if static_eval - margin >= beta {
+                return static_eval - margin;
+            }
+        }
 
         // Null move pruning
         if !is_pv
