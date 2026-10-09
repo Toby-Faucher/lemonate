@@ -75,7 +75,7 @@ static LMR_TABLE: once_cell::sync::Lazy<[[i32; 256]; 129]> =
             for move_count in 0..256 {
                 let ln_depth = (depth as f64).ln();
                 let ln_move_count = (move_count as f64).ln();
-                let reduction = (ln_depth * ln_move_count / 2.0) as i32;
+                let reduction = (ln_depth * ln_move_count / 1.75) as i32;
                 table[depth][move_count] = reduction.min(depth as i32 - 1).max(1);
             }
         }
@@ -1275,7 +1275,7 @@ mod tests {
         fn reference(depth: i32, move_count: usize) -> i32 {
             let ln_depth = (depth as f64).ln();
             let ln_move_count = (move_count as f64).ln();
-            let reduction = (ln_depth * ln_move_count / 2.0) as i32;
+            let reduction = (ln_depth * ln_move_count / 1.75) as i32;
             reduction.min(depth - 1).max(1)
         }
 
