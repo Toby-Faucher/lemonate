@@ -83,7 +83,7 @@ static LMR_TABLE: once_cell::sync::Lazy<[[i32; 256]; 129]> =
     });
 
 /// Futility pruning base margin (per depth).
-pub const FUTILITY_MARGIN_BASE: i32 = 150;
+pub const FUTILITY_MARGIN_BASE: i32 = 120;
 
 /// Aspiration window initial size.
 pub const ASPIRATION_WINDOW: i32 = 50;
