@@ -24,6 +24,16 @@ const MIN_TABLE_SIZE: usize = 1024;
 /// Threshold for considering a score as a mate score.
 const MATE_THRESHOLD: i32 = MATE_SCORE - 256;
 
+/// Depth credit (plies) granted per search of age distance when deciding
+/// whether a new entry may replace an existing same-position entry.
+const AGE_WEIGHT: i32 = 2;
+
+/// Wrapping distance between the current search age and an entry's age.
+#[inline]
+fn age_distance(current_age: u8, entry_age: u8) -> i32 {
+    current_age.wrapping_sub(entry_age) as i32
+}
+
 /// Entry types indicating the nature of the stored score.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EntryType {
@@ -190,9 +200,8 @@ impl TranspositionTable {
     ///
     /// Uses depth-preferred replacement with age consideration:
     /// - Always replace if entry is empty
-    /// - Always replace if entry is from a previous search (different age)
-    /// - Replace if new depth >= existing depth
-    /// - Replace if same position (hash matches)
+    /// - Always replace if the slot holds a different position
+    /// - Same position: replace if `depth + AGE_WEIGHT * age_distance >= existing depth`
     pub fn store(
         &mut self,
         hash: u64,
@@ -212,8 +221,9 @@ impl TranspositionTable {
         //   (prevents shallow aspiration re-searches from overwriting deeper results)
         let should_replace = existing.is_empty()
             || existing.hash != hash  // Different position (hash collision), must replace
-            || existing.age != self.current_age  // Old entry from previous search
-            || depth >= existing.depth;  // Same position, new search is at least as deep
+            // Same position: depth plus an age bonus must reach the old depth.
+            || depth as i32 + AGE_WEIGHT * age_distance(self.current_age, existing.age)
+                >= existing.depth as i32;
 
         if should_replace {
             // Preserve best move from existing entry if we don't have one
@@ -522,8 +532,8 @@ impl SharedTT {
 
         let should_replace = existing.is_empty()
             || existing.hash != hash
-            || existing.age != current_age
-            || depth >= existing.depth;
+            || depth as i32 + AGE_WEIGHT * age_distance(current_age, existing.age)
+                >= existing.depth as i32;
 
         if should_replace {
             let best_move = if best_move.is_some() {
@@ -684,9 +694,23 @@ mod tests {
         // Start a new search (increment age).
         tt.new_search();
 
-        // Store at lower depth - should replace because entry is old.
+        // One search old: 3 + 2*1 = 5 < 10, so the deep entry is kept.
+        tt.store(hash, 200, 3, EntryType::Exact, None);
+        assert_eq!(tt.probe(hash).unwrap().score, 100);
+
+        // Four searches old: 3 + 2*4 = 11 >= 10, so it is replaced.
+        for _ in 0..3 {
+            tt.new_search();
+        }
         tt.store(hash, 200, 3, EntryType::Exact, None);
         assert_eq!(tt.probe(hash).unwrap().score, 200);
+    }
+
+    #[test]
+    fn test_age_distance_wraps() {
+        assert_eq!(age_distance(5, 3), 2);
+        assert_eq!(age_distance(1, 255), 2);
+        assert_eq!(age_distance(7, 7), 0);
     }
 
     #[test]
@@ -960,7 +984,13 @@ mod tests {
         shared.store(hash, 100, 10, EntryType::Exact, None);
         shared.new_search();
         assert_eq!(shared.age(), 1);
-        // Old entry replaced regardless of depth after an age bump.
+        // One search old: 3 + 2*1 < 10, deep entry kept.
+        shared.store(hash, 200, 3, EntryType::Exact, None);
+        assert_eq!(shared.probe(hash).unwrap().score, 100);
+        // Four searches old: 3 + 2*4 >= 10, replaced.
+        for _ in 0..3 {
+            shared.new_search();
+        }
         shared.store(hash, 200, 3, EntryType::Exact, None);
         assert_eq!(shared.probe(hash).unwrap().score, 200);
 
