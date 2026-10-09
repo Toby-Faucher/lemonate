@@ -13,7 +13,7 @@ time of writing.
 - [x] 0007-futility-margin: change `FUTILITY_MARGIN_BASE` from 150 to 120, and separately to 200 **Result: inconclusive, -1.0 ± 7.4 Elo, 4000 games, LLR -1.24. Not merged.**
 - [x] 0008-reverse-futility: add static-eval beta pruning (reverse futility) at shallow depth in non-PV nodes, a technique the search does not have yet **Result: inconclusive, +7.1 ± 7.3 Elo, 4000 games, LLR 1.64. Not merged.**
 - [x] 0009-history-bonus: test history bonus formula in `src/search/history.rs`: change bonus from `depth * depth` to `depth * (depth + 1) / 2` (triangular instead of quadratic), or test different exponents **Result: inconclusive, -1.1 ± 7.3 Elo, 4000 games, LLR -1.3. Not merged.**
-- [ ] 0010-check-extension: extend the search by one ply when the side to move is in check
+- [x] 0010-check-extension: extend the search by one ply when the side to move is in check **Result: rejected, -27.4 ± 14.0 Elo, 1104 games, LLR -2.97. Not merged.**
 - [ ] 0011-tt-depth-age: test alternative TT replacement weighting in `src/search/transposition.rs`: combine depth and age into a unified score for replacement decisions instead of treating them separately
 - [ ] 0012-iir: internal iterative reduction: reduce depth at nodes with no hash move
 - [ ] 0013-retune-mobility: re-run `src/bin/tuner` on a larger quiet-position dataset and adopt the new mobility weights
