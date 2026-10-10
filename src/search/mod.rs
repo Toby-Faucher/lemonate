@@ -61,6 +61,9 @@ pub const NULL_MOVE_REDUCTION: i32 = 2;
 /// Minimum depth for null move pruning.
 pub const NULL_MOVE_MIN_DEPTH: i32 = 3;
 
+/// Minimum depth for internal iterative reduction (no hash move).
+pub const IIR_MIN_DEPTH: i32 = 4;
+
 /// Late move reduction thresholds.
 pub const LMR_FULL_DEPTH_MOVES: usize = 3;
 pub const LMR_REDUCTION_LIMIT: i32 = 3;
@@ -528,7 +531,7 @@ impl SearchEngine {
     fn negamax(
         &mut self,
         board: &mut Board,
-        depth: i32,
+        mut depth: i32,
         mut alpha: i32,
         beta: i32,
         ply: u8,
@@ -621,6 +624,12 @@ impl SearchEngine {
             if static_eval - margin >= beta {
                 return static_eval - margin;
             }
+        }
+
+        // Internal iterative reduction: with no hash move the ordering is
+        // poor, so search one ply shallower (depth stays >= IIR_MIN_DEPTH - 1).
+        if !in_check && depth >= IIR_MIN_DEPTH && hash_move.is_none() {
+            depth -= 1;
         }
 
         // Null move pruning
