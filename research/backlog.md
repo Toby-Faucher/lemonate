@@ -17,3 +17,4 @@ time of writing.
 - [x] 0011-tt-depth-age: test alternative TT replacement weighting in `src/search/transposition.rs`: combine depth and age into a unified score for replacement decisions instead of treating them separately **Result: inconclusive, +2.2 ± 7.3 Elo, 4000 games, LLR -0.12. Not merged.**
 - [x] 0012-iir: internal iterative reduction: reduce depth at nodes with no hash move **Result: inconclusive, +8.9 ± 7.4 Elo, 4000 games, LLR 2.29. Not merged.**
 - [ ] 0013-retune-mobility: re-run `src/bin/tuner` on a larger quiet-position dataset and adopt the new mobility weights
+- [x] 0014-stack-promising: stack the four unresolved small gains (0001 aspiration windows, 0003 null-move R=2, 0008 reverse futility, 0012 internal iterative reduction) on top of the merged LMR change (added after the backlog, at the owner's request). **Result: accepted, +29.5 ± 13.3 Elo, 1241 games, LLR 2.94. Merged.**
