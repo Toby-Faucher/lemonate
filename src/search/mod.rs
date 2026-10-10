@@ -56,13 +56,16 @@ pub const INFINITY: i32 = MATE_SCORE + 1000;
 pub const MAX_DEPTH: u8 = 128;
 
 /// Null move reduction depth.
-pub const NULL_MOVE_REDUCTION: i32 = 3;
+pub const NULL_MOVE_REDUCTION: i32 = 2;
 
 /// Minimum depth for null move pruning.
 pub const NULL_MOVE_MIN_DEPTH: i32 = 3;
 
+/// Minimum depth for internal iterative reduction (no hash move).
+pub const IIR_MIN_DEPTH: i32 = 4;
+
 /// Late move reduction thresholds.
-pub const LMR_FULL_DEPTH_MOVES: usize = 4;
+pub const LMR_FULL_DEPTH_MOVES: usize = 3;
 pub const LMR_REDUCTION_LIMIT: i32 = 3;
 
 /// Precomputed LMR table indexed by [depth][move_count].
@@ -85,8 +88,17 @@ static LMR_TABLE: once_cell::sync::Lazy<[[i32; 256]; 129]> =
 /// Futility pruning base margin (per depth).
 pub const FUTILITY_MARGIN_BASE: i32 = 150;
 
+/// Reverse futility pruning margin (per depth).
+pub const REVERSE_FUTILITY_MARGIN: i32 = 100;
+
+/// Maximum depth at which reverse futility pruning applies.
+pub const REVERSE_FUTILITY_MAX_DEPTH: i32 = 6;
+
 /// Aspiration window initial size.
 pub const ASPIRATION_WINDOW: i32 = 50;
+
+/// Minimum depth at which aspiration windows are used.
+const ASPIRATION_MIN_DEPTH: u8 = 5;
 
 /// Maximum ply tracked in the principal variation table.
 pub const PV_SIZE: usize = MAX_DEPTH as usize + 1;
@@ -405,8 +417,14 @@ impl SearchEngine {
             self.pv_len = [0; PV_SIZE];
 
             // Search at this depth.
-            // TEMPORARILY DISABLED: Aspiration windows to debug queen blunder
-            let (score, best_move) = {
+            // Aspiration window from the previous iteration's score once the
+            // score is stable enough (depth >= 5) and not a mate score.
+            let (score, best_move) = if depth >= ASPIRATION_MIN_DEPTH
+                && result.depth > 0
+                && !is_mate_score(result.score)
+            {
+                self.aspiration_search(&mut board, depth, result.score)
+            } else {
                 // Full window search.
                 let score = self.negamax(&mut board, depth as i32, -INFINITY, INFINITY, 0);
                 let best_move = match self.pv_first_move() {
@@ -447,8 +465,8 @@ impl SearchEngine {
         previous_score: i32,
     ) -> (i32, Option<Move>) {
         let mut delta = ASPIRATION_WINDOW;
-        let mut alpha = previous_score - delta;
-        let mut beta = previous_score + delta;
+        let mut alpha = (previous_score - delta).max(-INFINITY);
+        let mut beta = (previous_score + delta).min(INFINITY);
 
         loop {
             let score = self.negamax(board, depth as i32, alpha, beta, 0);
@@ -462,17 +480,16 @@ impl SearchEngine {
                 return (score, best_move);
             }
 
-            // Check if score is within window.
-            if score <= alpha {
-                // Fail low - widen alpha.
+            let full_window = alpha <= -INFINITY && beta >= INFINITY;
+            if score <= alpha && !full_window {
+                // Fail low - pull beta toward alpha and widen alpha.
+                beta = (alpha + beta) / 2;
                 alpha = (score - delta).max(-INFINITY);
-                delta *= 2;
-            } else if score >= beta {
+            } else if score >= beta && !full_window {
                 // Fail high - widen beta.
                 beta = (score + delta).min(INFINITY);
-                delta *= 2;
             } else {
-                // Score is within window.
+                // Score is within the window (or the window was full).
                 let best_move = match self.pv_first_move() {
                     Some(mv) => Some(mv),
                     None => self.get_hash_move(board.position_hash()),
@@ -480,11 +497,20 @@ impl SearchEngine {
                 return (score, best_move);
             }
 
-            // Fallback to full window if delta gets too large.
-            // Lower threshold (200 instead of 500) to reduce aspiration bugs.
+            delta *= 2;
+
+            // Fall back to the open side(s) of the window if delta gets
+            // large, or if a bound reaches mate range.
             if delta > 200 {
                 alpha = -INFINITY;
                 beta = INFINITY;
+            } else {
+                if alpha < -(MATE_SCORE - 500) {
+                    alpha = -INFINITY;
+                }
+                if beta > MATE_SCORE - 500 {
+                    beta = INFINITY;
+                }
             }
         }
     }
@@ -505,7 +531,7 @@ impl SearchEngine {
     fn negamax(
         &mut self,
         board: &mut Board,
-        depth: i32,
+        mut depth: i32,
         mut alpha: i32,
         beta: i32,
         ply: u8,
@@ -585,6 +611,26 @@ impl SearchEngine {
         // Static evaluation for pruning decisions.
         let static_eval = self.evaluator.evaluate(board);
         let in_check = board.is_in_check();
+
+        // Reverse futility pruning: static eval far above beta at shallow depth.
+        if !is_pv
+            && !in_check
+            && depth >= 1
+            && depth <= REVERSE_FUTILITY_MAX_DEPTH
+            && beta.abs() < MATE_SCORE - MAX_DEPTH as i32
+            && self.can_null_move(board, ply)
+        {
+            let margin = REVERSE_FUTILITY_MARGIN * depth;
+            if static_eval - margin >= beta {
+                return static_eval - margin;
+            }
+        }
+
+        // Internal iterative reduction: with no hash move the ordering is
+        // poor, so search one ply shallower (depth stays >= IIR_MIN_DEPTH - 1).
+        if !in_check && depth >= IIR_MIN_DEPTH && hash_move.is_none() {
+            depth -= 1;
+        }
 
         // Null move pruning
         if !is_pv

@@ -1,0 +1,26 @@
+diff --git a/src/search/history.rs b/src/search/history.rs
+index e154e4b..b0d88a3 100644
+--- a/src/search/history.rs
++++ b/src/search/history.rs
+@@ -15,10 +15,10 @@ use crate::types::Color;
+ /// Maximum history score before scaling.
+ pub const MAX_HISTORY_SCORE: i32 = 16384;
+ 
+-/// History bonus formula: depth * depth
++/// History bonus formula: depth * (depth + 1) / 2 (triangular; max 8256 at depth 128, below the clamp)
+ #[inline]
+ fn history_bonus(depth: i32) -> i32 {
+-    depth * depth
++    depth * (depth + 1) / 2
+ }
+ 
+ /// History table for quiet move ordering.
+@@ -244,7 +244,7 @@ mod tests {
+ 
+         let score = table.get(Color::White, &mv);
+         assert!(score > 0, "Score should be positive after cutoff: {}", score);
+-        assert_eq!(score, 25); // depth * depth = 5 * 5 = 25
++        assert_eq!(score, 15); // depth * (depth + 1) / 2 = 5 * 6 / 2 = 15
+     }
+ 
+     #[test]

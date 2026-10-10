@@ -1,0 +1,24 @@
+{
+  "baseline_commit": "3396a1e16868b1973a10779c4b26b46a72ba59cd",
+  "candidate_commit": "2a503afc5262e33f19840c3000fcaeced1389190",
+  "config_hash": "49c98eaf893f",
+  "gate": {
+    "preflight": "pass",
+    "build": "pass",
+    "test": "pass",
+    "perft": "pass",
+    "sprt": "fail"
+  },
+  "sprt": {
+    "games": 4000,
+    "wins": 1001,
+    "losses": 898,
+    "draws": 2101,
+    "elo": 8.9,
+    "elo_err": 7.4,
+    "llr": 2.25,
+    "verdict": "inconclusive"
+  },
+  "status": "inconclusive",
+  "reason": "SPRT verdict: inconclusive"
+}

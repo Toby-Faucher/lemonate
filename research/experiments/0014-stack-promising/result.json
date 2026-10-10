@@ -1,0 +1,24 @@
+{
+  "baseline_commit": "821ee309db9d494edc3188056d9be6ef7b56c56a",
+  "candidate_commit": "3b9c65526664fd8ea3f54a45cfd7761d3ffb3643",
+  "config_hash": "49c98eaf893f",
+  "gate": {
+    "preflight": "pass",
+    "build": "pass",
+    "test": "pass",
+    "perft": "pass",
+    "sprt": "pass"
+  },
+  "sprt": {
+    "games": 1241,
+    "wins": 347,
+    "losses": 242,
+    "draws": 652,
+    "elo": 29.5,
+    "elo_err": 13.3,
+    "llr": 2.94,
+    "verdict": "H1"
+  },
+  "status": "accepted",
+  "reason": ""
+}
