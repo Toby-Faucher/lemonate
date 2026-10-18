@@ -304,6 +304,20 @@ impl SearchEngine {
         }
     }
 
+    /// Store a quiescence result in the active table (see `store_qs`). Mate-range scores are
+    /// skipped: quiescence does not track mate distance.
+    #[inline]
+    fn tt_store_qs(&mut self, hash: u64, score: i32, entry_type: EntryType) {
+        if score.abs() >= MATE_SCORE - MAX_DEPTH as i32 {
+            return;
+        }
+        if let Some(shared) = &self.shared {
+            shared.store_qs(hash, score, entry_type);
+        } else {
+            self.tt.store_qs(hash, score, entry_type);
+        }
+    }
+
     /// Bump the age of the active transposition table.
     fn tt_new_search(&mut self) {
         if let Some(shared) = &self.shared {
@@ -938,6 +952,15 @@ impl SearchEngine {
             return 0;
         }
 
+        // The same position is reached by many capture orders; reuse earlier results.
+        let hash = board.position_hash();
+        let original_alpha = alpha;
+        if let Some(entry) = self.tt_probe(hash) {
+            if let Some(score) = entry.get_score(alpha, beta) {
+                return TranspositionTable::adjust_score_for_retrieval(score, ply);
+            }
+        }
+
         // Stand pat - if we're not in check, we can assume we can at least
         // achieve the static evaluation by not making any captures.
         let in_check = board.is_in_check();
@@ -945,6 +968,7 @@ impl SearchEngine {
 
         if !in_check {
             if stand_pat >= beta {
+                self.tt_store_qs(hash, beta, EntryType::LowerBound);
                 return beta;
             }
             if stand_pat > alpha {
@@ -1042,6 +1066,7 @@ impl SearchEngine {
             board.undo_move(mv, undo);
 
             if score >= beta {
+                self.tt_store_qs(hash, beta, EntryType::LowerBound);
                 return beta;
             }
             if score > alpha {
@@ -1049,6 +1074,12 @@ impl SearchEngine {
             }
         }
 
+        let entry_type = if alpha > original_alpha {
+            EntryType::Exact
+        } else {
+            EntryType::UpperBound
+        };
+        self.tt_store_qs(hash, alpha, entry_type);
         alpha
     }
 
