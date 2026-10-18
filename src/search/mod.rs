@@ -785,16 +785,25 @@ impl SearchEngine {
             // The position we are leaving joins the path for the children's repetition check.
             self.path.push(hash);
 
-            // Search with reduced depth first.
-            let mut score = if reduction > 0 {
-                -self.negamax(board, depth - 1 - reduction, -alpha - 1, -alpha, ply + 1)
-            } else {
-                alpha + 1 // Force full search.
-            };
-
-            // Re-search at full depth if reduced search raised alpha.
-            if score > alpha {
+            // Principal variation search. The first move gets the full window. Every later
+            // move is scouted with a null window (reduced when LMR applies) and only
+            // re-searched if it turns out to beat alpha. Scouts are non-PV nodes, so the
+            // pruning that is off in PV nodes (TT cutoffs, reverse futility, null move,
+            // futility) applies to them.
+            let mut score;
+            if move_count == 1 {
                 score = -self.negamax(board, depth - 1, -beta, -alpha, ply + 1);
+            } else {
+                score = -self.negamax(board, depth - 1 - reduction, -alpha - 1, -alpha, ply + 1);
+                // A reduced scout that beat alpha is repeated at full depth, still null-window.
+                if score > alpha && reduction > 0 {
+                    score = -self.negamax(board, depth - 1, -alpha - 1, -alpha, ply + 1);
+                }
+                // Only a move that lands strictly inside the window needs the full-window search
+                // (in a non-PV node beta == alpha + 1, so this never fires there).
+                if score > alpha && score < beta {
+                    score = -self.negamax(board, depth - 1, -beta, -alpha, ply + 1);
+                }
             }
 
             // Unmake the move.
