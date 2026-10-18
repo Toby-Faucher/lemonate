@@ -11,8 +11,8 @@ use crate::search::{parallel_search, SearchEngine, SearchLimits, SearchResult, S
 use crate::types::Color;
 
 use super::protocol::{
-    format_bestmove, format_info, format_uci_id, parse_command, parse_uci_move, GoParams,
-    UciCommand,
+    clamp_hash_mb, format_bestmove, format_info, format_uci_id, parse_command, parse_uci_move,
+    GoParams, UciCommand, HASH_DEFAULT_MB,
 };
 
 use std::io::{self, BufRead, Write};
@@ -49,20 +49,21 @@ pub struct UciEngine {
     debug: bool,
     /// Worker thread count for Lazy SMP search (UCI `Threads` option).
     num_threads: usize,
-    /// Transposition table shared by SMP workers. Persists across moves
-    /// like the main engine; recreated on `Hash` changes, cleared on
-    /// `ucinewgame`. Unused while `num_threads == 1`.
-    shared_tt: Arc<SharedTT>,
+    /// Transposition table shared by SMP workers. Created lazily the first
+    /// time a multi-threaded search runs (so the default single-threaded
+    /// setup does not pay for a second table), persists across moves like
+    /// the main engine, dropped on `Hash` changes and cleared on `ucinewgame`.
+    shared_tt: Option<Arc<SharedTT>>,
+    /// Current `Hash` option value in MB.
+    hash_mb: usize,
 }
-
-/// Default TT size in MB (matches the engine default).
-const DEFAULT_HASH_MB: usize = 64;
 
 impl UciEngine {
     /// Create a new UCI engine.
     pub fn new() -> Self {
         let mut board = Board::starting_position();
         board.enable_history();
+        Self::warm_up();
 
         Self {
             board,
@@ -70,8 +71,17 @@ impl UciEngine {
             active: None,
             debug: false,
             num_threads: 1,
-            shared_tt: Arc::new(SharedTT::new(DEFAULT_HASH_MB)),
+            shared_tt: None,
+            hash_mb: HASH_DEFAULT_MB,
         }
+    }
+
+    /// Run a tiny search so lazily initialised tables (attack tables, LMR table,
+    /// Zobrist keys) are built before the first `go`, outside any game clock.
+    fn warm_up() {
+        let board = Board::starting_position();
+        let mut engine = SearchEngine::with_hash_size(1);
+        engine.search(&board, SearchLimits::depth(1));
     }
 
     /// Signal the worker to stop and wait for it, reclaiming the engine.
@@ -165,7 +175,9 @@ impl UciEngine {
             UciCommand::SetOption { name, value } => self.handle_setoption(&name, value),
             UciCommand::Register => {} // Not implemented.
             UciCommand::UciNewGame => self.handle_ucinewgame(),
-            UciCommand::Position { fen, moves } => self.handle_position(fen.as_deref(), &moves),
+            UciCommand::Position { fen, moves } => {
+                self.handle_position(fen.as_deref(), &moves, stdout)
+            }
             UciCommand::Go(params) => self.handle_go(params),
             UciCommand::Stop => self.handle_stop(stdout),
             UciCommand::PonderHit => {} // Not implemented.
@@ -241,13 +253,17 @@ impl UciEngine {
         match name.to_lowercase().as_str() {
             "hash" => {
                 if let Some(v) = value {
-                    if let Ok(size_mb) = v.parse::<usize>() {
+                    if let Ok(requested) = v.trim().parse::<usize>() {
+                        // Stay inside the advertised range: an absurd value
+                        // would abort the process on allocation failure.
+                        let size_mb = clamp_hash_mb(requested);
                         let mut engine = self.take_engine();
                         engine.set_hash_size(size_mb);
                         self.engine = Some(engine);
-                        // Keep the shared table in sync (recreated while
-                        // no search is running, so no worker holds it).
-                        self.shared_tt = Arc::new(SharedTT::new(size_mb));
+                        self.hash_mb = size_mb;
+                        // The shared table is rebuilt lazily at the new size
+                        // (no search is running, so no worker holds it).
+                        self.shared_tt = None;
                     }
                 }
             }
@@ -256,6 +272,9 @@ impl UciEngine {
                     if let Ok(n) = v.parse::<usize>() {
                         self.stop_search();
                         self.num_threads = n.clamp(1, 256);
+                        if self.num_threads == 1 {
+                            self.shared_tt = None;
+                        }
                     }
                 }
             }
@@ -273,41 +292,58 @@ impl UciEngine {
         engine.new_game();
         self.engine = Some(engine);
         // The shared table is cleared once here, not once per worker.
-        self.shared_tt.clear();
+        if let Some(tt) = &self.shared_tt {
+            tt.clear();
+        }
         self.board = Board::starting_position();
         self.board.enable_history();
     }
 
     /// Handle "position" command.
-    fn handle_position(&mut self, fen: Option<&str>, moves: &[String]) {
+    ///
+    /// The new position is built on the side and only installed if the FEN and
+    /// every move in the list are valid. Otherwise the previous position is kept
+    /// and an `info string` explains why, instead of silently searching a
+    /// position the GUI never asked for.
+    fn handle_position(&mut self, fen: Option<&str>, moves: &[String], stdout: &mut io::Stdout) {
         // Changing the position while searching is meaningless; stop first.
         self.stop_search();
 
-        // Set up the position.
-        self.board = match fen {
+        let mut board = match fen {
             Some(f) => match Board::from_fen(f) {
                 Ok(b) => b,
                 Err(_) => {
-                    if self.debug {
-                        eprintln!("Invalid FEN: {}", f);
-                    }
+                    self.report_error(stdout, &format!("invalid FEN '{}', position unchanged", f));
                     return;
                 }
             },
             None => Board::starting_position(),
         };
+        board.enable_history();
 
-        self.board.enable_history();
-
-        // Apply moves.
         for move_str in moves {
-            let legal_moves = self.board.generate_legal_moves();
-            if let Some(mv) = parse_uci_move(move_str, &legal_moves) {
-                self.board.make_move(mv);
-            } else if self.debug {
-                eprintln!("Invalid move: {}", move_str);
+            let legal_moves = board.generate_legal_moves();
+            match parse_uci_move(move_str, &legal_moves) {
+                Some(mv) => {
+                    board.make_move(mv);
+                }
+                None => {
+                    self.report_error(
+                        stdout,
+                        &format!("illegal or unparseable move '{}', position unchanged", move_str),
+                    );
+                    return;
+                }
             }
         }
+
+        self.board = board;
+    }
+
+    /// Report a recoverable protocol problem to the GUI.
+    fn report_error(&self, stdout: &mut io::Stdout, msg: &str) {
+        let _ = writeln!(stdout, "info string error: {}", msg);
+        let _ = stdout.flush();
     }
 
     /// Handle "go" command: start a search on the worker thread.
@@ -337,7 +373,15 @@ impl UciEngine {
         let engine = self.engine.take().unwrap_or_default();
         let board = self.board.clone();
         let num_threads = self.num_threads;
-        let shared_tt = Arc::clone(&self.shared_tt);
+        let hash_mb = self.hash_mb;
+        let shared_tt = if num_threads > 1 {
+            Some(Arc::clone(
+                self.shared_tt
+                    .get_or_insert_with(|| Arc::new(SharedTT::new(hash_mb))),
+            ))
+        } else {
+            None
+        };
         let (result_tx, result_rx) = mpsc::channel::<WorkerResult>();
         // Generous stack: deep search frames hold fixed-size move buffers.
         let handle = thread::Builder::new()
@@ -347,12 +391,15 @@ impl UciEngine {
                 let start = Instant::now();
                 // Threads == 1 keeps the exact historical path
                 // (private TT, no SMP machinery).
-                let (engine, result) = if num_threads <= 1 {
-                    let mut engine = engine;
-                    let result = engine.search(&board, limits);
-                    (engine, result)
-                } else {
-                    parallel_search(&board, limits, num_threads, &shared_tt, engine)
+                let (engine, result) = match shared_tt {
+                    Some(shared) if num_threads > 1 => {
+                        parallel_search(&board, limits, num_threads, &shared, engine)
+                    }
+                    _ => {
+                        let mut engine = engine;
+                        let result = engine.search(&board, limits);
+                        (engine, result)
+                    }
                 };
                 let elapsed_ms = start.elapsed().as_millis();
                 let _ = result_tx.send(WorkerResult {
@@ -381,6 +428,12 @@ impl UciEngine {
 
     /// Convert GoParams to SearchLimits.
     fn go_params_to_limits(&self, params: &GoParams, stop: Arc<AtomicBool>) -> SearchLimits {
+        // A depth of 0 (or one beyond what the search supports) is not a
+        // meaningful request: search at least one ply, at most MAX_DEPTH.
+        let params = &GoParams {
+            depth: params.depth.map(|d| d.clamp(1, MAX_DEPTH)),
+            ..params.clone()
+        };
         // Infinite search.
         if params.infinite {
             let mut limits = SearchLimits::infinite().with_stop_signal(stop);

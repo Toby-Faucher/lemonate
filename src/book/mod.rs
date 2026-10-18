@@ -324,11 +324,24 @@ fn uniform_random_select(entries: &[BookEntry]) -> Option<BookEntry> {
 mod tests {
     use super::*;
 
-    /// Path to the test opening book
+    /// Path to the test opening book. `/bins` is git-ignored, so the file is absent on a
+    /// fresh clone; the tests that need it skip instead of failing.
     const TEST_BOOK_PATH: &str = "bins/Perfect2021.bin";
+
+    /// True when the book file is present; otherwise prints a skip notice.
+    fn book_present() -> bool {
+        let present = std::path::Path::new(TEST_BOOK_PATH).exists();
+        if !present {
+            eprintln!("skipping: {} not found (git-ignored test data)", TEST_BOOK_PATH);
+        }
+        present
+    }
 
     #[test]
     fn test_load_perfect2021_book() {
+        if !book_present() {
+            return;
+        }
         let mut manager = BookManager::new();
         let result = manager.load(TEST_BOOK_PATH);
         assert!(result.is_ok(), "Failed to load book: {:?}", result.err());
@@ -339,6 +352,9 @@ mod tests {
 
     #[test]
     fn test_probe_starting_position() {
+        if !book_present() {
+            return;
+        }
         let mut manager = BookManager::new();
         manager.load(TEST_BOOK_PATH).expect("Failed to load book");
 
@@ -368,6 +384,9 @@ mod tests {
 
     #[test]
     fn test_probe_after_e4() {
+        if !book_present() {
+            return;
+        }
         let mut manager = BookManager::new();
         manager.load(TEST_BOOK_PATH).expect("Failed to load book");
 
@@ -390,6 +409,9 @@ mod tests {
 
     #[test]
     fn test_book_move_selection_best() {
+        if !book_present() {
+            return;
+        }
         let mut manager = BookManager::new();
         manager.load(TEST_BOOK_PATH).expect("Failed to load book");
         manager.selection = BookMoveSelection::Best;
