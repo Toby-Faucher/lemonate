@@ -91,16 +91,18 @@ struct MagicRng {
 
 impl MagicRng {
     fn new(seed: u64) -> Self {
-        Self { state: seed }
+        // xorshift has a fixed point at 0.
+        Self { state: if seed == 0 { 0x9E37_79B9_7F4A_7C15 } else { seed } }
     }
 
     fn next(&mut self) -> u64 {
-        self.state = self
-            .state
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
-
-        self.state
+        // xorshift64*: consecutive outputs are uncorrelated, which matters because
+        // `sparse` ANDs several of them. (A plain LCG returning its raw state gave
+        // candidates so poor that rook a1 took minutes and rook c1 never succeeded.)
+        self.state ^= self.state >> 12;
+        self.state ^= self.state << 25;
+        self.state ^= self.state >> 27;
+        self.state.wrapping_mul(0x2545_F491_4F6C_DD1D)
     }
 
     fn sparse(&mut self) -> u64 {
@@ -113,173 +115,70 @@ impl MagicRng {
     }
 }
 
+/// Search for a magic multiplier for `square` with the given occupancy `mask`.
+///
+/// Candidates are always sparse (an AND of three random words): dense random words almost
+/// never work for masks of 10+ bits, so falling back to them (as an earlier version did
+/// after 30k attempts) turns a millisecond search into one that never finishes.
 pub fn find_magic(square: Square, mask: Bitboard, is_rook: bool) -> u64 {
     let n_bits = mask.count_pieces();
+    assert!(n_bits > 0, "cannot find a magic for an empty mask");
     let shift = 64 - n_bits;
-    let num_patterns = 1 << n_bits;
+    let num_patterns = 1usize << n_bits;
 
-    if square.index() <= 5 {
-        eprintln!(
-            "Finding magic for {} square {} ({}x{}, {} bits in mask, {} patterns)",
-            if is_rook { "rook" } else { "bishop" },
-            square.index(),
-            square.file(),
-            square.rank(),
-            n_bits,
-            num_patterns
-        );
-    }
-
-    let mut blockers = Vec::new();
-    let mut attacks = Vec::new();
-
+    let mut blockers = Vec::with_capacity(num_patterns);
+    let mut attacks = Vec::with_capacity(num_patterns);
     for i in 0..num_patterns {
         let blocker_board = generate_blocker_board(i, mask);
         blockers.push(blocker_board);
-
-        let attack_board = if is_rook {
+        attacks.push(if is_rook {
             calculate_rook_attacks(square, blocker_board)
         } else {
             calculate_bishop_attacks(square, blocker_board)
-        };
-        attacks.push(attack_board);
+        });
     }
 
-    // Use a better seed based on square index and mask pattern
-    let seed = (square.index() as u64).wrapping_mul(1103515245).wrapping_add(mask.0);
+    let seed = (square.index() as u64)
+        .wrapping_mul(1103515245)
+        .wrapping_add(mask.0);
     let mut rng = MagicRng::new(seed);
-    let mut used = vec![None; num_patterns];
+    let mut used: Vec<Option<Bitboard>> = vec![None; num_patterns];
 
-    const MAX_ATTEMPTS: usize = 100_000_000;
-    let mut attempts = 0;
+    const MAX_ATTEMPTS: u64 = 1_000_000_000;
+    for _ in 0..MAX_ATTEMPTS {
+        let magic = rng.sparse();
 
-    // Progressive strategy:
-    // 0-10k: very sparse (3-way AND)
-    // 10k-30k: semi-sparse (2-way AND)
-    // 30k-60k: regular random
-    // 60k+: restart with new seed
-
-    'search: loop {
-        attempts += 1;
-        if attempts > MAX_ATTEMPTS {
-            panic!(
-                "Failed to find magic number for {} square {} after {} attempts. Mask has {} bits.",
-                if is_rook { "rook" } else { "bishop" },
-                square.index(),
-                MAX_ATTEMPTS,
-                n_bits
-            );
-        }
-
-        // Progressive fallback strategy
-        if attempts == 10_000 {
-            eprintln!(
-                "Switching to semi-sparse random numbers for {} square {}",
-                if is_rook { "rook" } else { "bishop" },
-                square.index()
-            );
-        } else if attempts == 30_000 {
-            eprintln!(
-                "Switching to non-sparse random numbers for {} square {}",
-                if is_rook { "rook" } else { "bishop" },
-                square.index()
-            );
-        } else if attempts % 60_000 == 0 && attempts > 0 {
-            // Reset with new seed every 60k attempts
-            let new_seed = rng.next().wrapping_mul(square.index() as u64 + attempts as u64);
-            rng = MagicRng::new(new_seed);
-            eprintln!(
-                "Restarting with new seed for {} square {} at attempt {}",
-                if is_rook { "rook" } else { "bishop" },
-                square.index(),
-                attempts
-            );
-        }
-
-        let magic = if attempts < 10_000 {
-            rng.sparse()
-        } else if attempts < 30_000 {
-            rng.semi_sparse()
-        } else {
-            rng.next()
-        };
-
-        // Skip obviously bad candidates
-        if magic == 0 {
-            continue;
-        }
-
-        // For sparse strategies, ensure the magic has enough bits set in the upper portion
-        // This is important because we're using the upper bits after multiplication
-        if attempts < 30_000 {
-            let upper_bits = magic >> 32;
-            let bit_count = upper_bits.count_ones();
-            // Need at least a few bits set in upper half for good hashing
-            if bit_count < 3 {
-                continue;
-            }
-        }
-
-        // Quick quality check: the product of mask and magic should have good bit distribution
-        // in the upper bits that we'll be using
-        let test_product = mask.0.wrapping_mul(magic);
-        let upper_bits = test_product >> shift;
-        if upper_bits.count_ones() < 3 {
+        // A useful magic spreads the mask into the top byte (Tord Romstad's filter).
+        if (mask.0.wrapping_mul(magic) & 0xFF00_0000_0000_0000).count_ones() < 6 {
             continue;
         }
 
         used.fill(None);
-
-        let mut failed_at = None;
-        for i in 0..blockers.len() {
+        let mut collision = false;
+        for i in 0..num_patterns {
             let index = (blockers[i].0.wrapping_mul(magic) >> shift) as usize;
-
-            if index >= num_patterns {
-                eprintln!(
-                    "ERROR: index {} >= num_patterns {} for square {}, shift={}, n_bits={}",
-                    index, num_patterns, square.index(), shift, n_bits
-                );
-                panic!("Index out of bounds in magic search!");
-            }
-
             match used[index] {
                 None => used[index] = Some(attacks[i]),
-                Some(stored) if stored == attacks[i] => {
-                    // Constructive collision - OK
-                    continue;
-                }
+                // Two blocker sets may share a slot only if their attacks are identical.
+                Some(stored) if stored == attacks[i] => {}
                 Some(_) => {
-                    // Destructive collision - bad
-                    failed_at = Some(i);
+                    collision = true;
                     break;
                 }
             }
         }
-
-        if let Some(fail_idx) = failed_at {
-            if square.index() <= 5 && attempts % 10000 == 0 {
-                eprintln!(
-                    "  Attempt {}: magic=0x{:X}, failed at blocker {}/{}",
-                    attempts,
-                    magic,
-                    fail_idx,
-                    blockers.len()
-                );
-            }
-            continue 'search;
+        if !collision {
+            return magic;
         }
-
-        if attempts > 1000 {
-            eprintln!(
-                "Found magic for {} square {} after {} attempts",
-                if is_rook { "rook" } else { "bishop" },
-                square.index(),
-                attempts
-            );
-        }
-
-        return magic;
     }
+
+    panic!(
+        "no magic found for {} square {} ({} mask bits) after {} attempts",
+        if is_rook { "rook" } else { "bishop" },
+        square.index(),
+        n_bits,
+        MAX_ATTEMPTS
+    );
 }
 
 pub fn init_bishop_magics() -> [Magic; 64] {
@@ -325,17 +224,6 @@ pub fn init_rook_magics() -> [Magic; 64] {
         let square = Square::from_index(sq_idx);
         let mask = generate_rook_mask(square);
 
-        if mask.count_pieces() == 0 {
-            // Corner squares have empty masks - they don't need magic numbers
-            magics[sq_idx] = Magic {
-                mask: Bitboard::EMPTY,
-                magic: 0,
-                shift: 64,
-                offset,
-            };
-            continue;
-        }
-
         magics[sq_idx] = Magic {
             mask,
             magic: ROOK_MAGICS[sq_idx],
@@ -347,4 +235,92 @@ pub fn init_rook_magics() -> [Magic; 64] {
     }
 
     magics
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A magic is valid if no two blocker sets that need different attack sets share a slot.
+    fn is_valid_magic(square: Square, mask: Bitboard, magic: u64, is_rook: bool) -> bool {
+        let n_bits = mask.count_pieces();
+        let shift = 64 - n_bits;
+        let mut table: Vec<Option<Bitboard>> = vec![None; 1usize << n_bits];
+        for i in 0..(1usize << n_bits) {
+            let blockers = generate_blocker_board(i, mask);
+            let attacks = if is_rook {
+                calculate_rook_attacks(square, blockers)
+            } else {
+                calculate_bishop_attacks(square, blockers)
+            };
+            let slot = (blockers.0.wrapping_mul(magic) >> shift) as usize;
+            match table[slot] {
+                None => table[slot] = Some(attacks),
+                Some(stored) if stored == attacks => {}
+                Some(_) => return false,
+            }
+        }
+        true
+    }
+
+    #[test]
+    fn rook_masks_are_never_empty_even_in_corners() {
+        // init_rook_magics has a branch for "empty" corner masks; a rook always sees along
+        // its rank and file, so that branch must be unreachable.
+        for idx in 0..64 {
+            let mask = generate_rook_mask(Square::from_index(idx));
+            assert!(mask.count_pieces() >= 10, "square {idx}: {} bits", mask.count_pieces());
+        }
+    }
+
+    #[test]
+    fn hardcoded_rook_magics_are_collision_free() {
+        let magics = init_rook_magics();
+        for idx in 0..64 {
+            let sq = Square::from_index(idx);
+            assert!(
+                is_valid_magic(sq, magics[idx].mask, magics[idx].magic, true),
+                "rook magic for square {idx} collides"
+            );
+        }
+    }
+
+    #[test]
+    fn hardcoded_bishop_magics_are_collision_free() {
+        let magics = init_bishop_magics();
+        for idx in 0..64 {
+            let sq = Square::from_index(idx);
+            assert!(
+                is_valid_magic(sq, magics[idx].mask, magics[idx].magic, false),
+                "bishop magic for square {idx} collides"
+            );
+        }
+    }
+
+    #[test]
+    fn finder_returns_valid_magics_for_hard_and_easy_squares() {
+        // a1 and h8 have the largest rook masks (12 bits) and used to take minutes or never
+        // finish; e4 is a middle-of-the-board bishop; c1 is the square that used to panic.
+        for (idx, is_rook) in [(0, true), (63, true), (2, true), (28, false), (0, false)] {
+            let sq = Square::from_index(idx);
+            let mask = if is_rook { generate_rook_mask(sq) } else { generate_bishop_mask(sq) };
+            let magic = find_magic(sq, mask, is_rook);
+            assert!(is_valid_magic(sq, mask, magic, is_rook), "square {idx} rook={is_rook}");
+        }
+    }
+
+    /// Regenerates all 128 magics (~2 s in release, much slower in debug).
+    /// Run with: cargo test --release -- --ignored finder_regenerates_every_magic
+    #[test]
+    #[ignore]
+    fn finder_regenerates_every_magic() {
+        for is_rook in [true, false] {
+            for idx in 0..64 {
+                let sq = Square::from_index(idx);
+                let mask = if is_rook { generate_rook_mask(sq) } else { generate_bishop_mask(sq) };
+                let magic = find_magic(sq, mask, is_rook);
+                assert!(is_valid_magic(sq, mask, magic, is_rook), "square {idx} rook={is_rook}");
+            }
+        }
+    }
 }
