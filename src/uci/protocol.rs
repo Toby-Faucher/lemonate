@@ -6,6 +6,33 @@ use crate::board::{Move, MoveType};
 use crate::search::{is_mate_score, mate_in, SearchResult};
 use crate::types::{PieceType, Square};
 
+/// Advertised `Hash` option range, in MB.
+pub const HASH_MIN_MB: usize = 1;
+pub const HASH_MAX_MB: usize = 4096;
+pub const HASH_DEFAULT_MB: usize = 64;
+
+/// Clamp a requested `Hash` size to the advertised range.
+pub fn clamp_hash_mb(requested: usize) -> usize {
+    requested.clamp(HASH_MIN_MB, HASH_MAX_MB)
+}
+
+/// Parse a UCI integer without dropping the whole parameter on values real GUIs send:
+/// a negative number (e.g. the clock of a player already flagged) becomes 0 and a value
+/// too large for u64 saturates. Anything that is not an integer is `None`.
+fn parse_uci_int(s: &str) -> Option<u64> {
+    let (negative, digits) = match s.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, s),
+    };
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    if negative {
+        return Some(0);
+    }
+    Some(digits.parse::<u64>().unwrap_or(u64::MAX))
+}
+
 /// UCI command parsed from input.
 #[derive(Debug, Clone)]
 pub enum UciCommand {
@@ -177,55 +204,55 @@ fn parse_go<'a>(tokens: &mut impl Iterator<Item = &'a str>) -> GoParams {
             "ponder" => params.ponder = true,
             "wtime" => {
                 if i + 1 < tokens.len() {
-                    params.wtime = tokens[i + 1].parse().ok();
+                    params.wtime = parse_uci_int(tokens[i + 1]);
                     i += 1;
                 }
             }
             "btime" => {
                 if i + 1 < tokens.len() {
-                    params.btime = tokens[i + 1].parse().ok();
+                    params.btime = parse_uci_int(tokens[i + 1]);
                     i += 1;
                 }
             }
             "winc" => {
                 if i + 1 < tokens.len() {
-                    params.winc = tokens[i + 1].parse().ok();
+                    params.winc = parse_uci_int(tokens[i + 1]);
                     i += 1;
                 }
             }
             "binc" => {
                 if i + 1 < tokens.len() {
-                    params.binc = tokens[i + 1].parse().ok();
+                    params.binc = parse_uci_int(tokens[i + 1]);
                     i += 1;
                 }
             }
             "movestogo" => {
                 if i + 1 < tokens.len() {
-                    params.movestogo = tokens[i + 1].parse().ok();
+                    params.movestogo = parse_uci_int(tokens[i + 1]).map(|v| v.min(u32::MAX as u64) as u32);
                     i += 1;
                 }
             }
             "depth" => {
                 if i + 1 < tokens.len() {
-                    params.depth = tokens[i + 1].parse().ok();
+                    params.depth = parse_uci_int(tokens[i + 1]).map(|v| v.min(u8::MAX as u64) as u8);
                     i += 1;
                 }
             }
             "nodes" => {
                 if i + 1 < tokens.len() {
-                    params.nodes = tokens[i + 1].parse().ok();
+                    params.nodes = parse_uci_int(tokens[i + 1]);
                     i += 1;
                 }
             }
             "mate" => {
                 if i + 1 < tokens.len() {
-                    params.mate = tokens[i + 1].parse().ok();
+                    params.mate = parse_uci_int(tokens[i + 1]).map(|v| v.min(u32::MAX as u64) as u32);
                     i += 1;
                 }
             }
             "movetime" => {
                 if i + 1 < tokens.len() {
-                    params.movetime = tokens[i + 1].parse().ok();
+                    params.movetime = parse_uci_int(tokens[i + 1]);
                     i += 1;
                 }
             }
@@ -263,7 +290,10 @@ pub fn format_uci_id() -> String {
     output.push_str("id name Lemonate\n");
     output.push_str("id author Toby\n");
     output.push_str("\n");
-    output.push_str("option name Hash type spin default 64 min 1 max 4096\n");
+    output.push_str(&format!(
+        "option name Hash type spin default {} min {} max {}\n",
+        HASH_DEFAULT_MB, HASH_MIN_MB, HASH_MAX_MB
+    ));
     output.push_str("option name Threads type spin default 1 min 1 max 256\n");
     output.push_str("\n");
     output.push_str("uciok");
@@ -404,6 +434,43 @@ pub fn parse_uci_move(s: &str, legal_moves: &[Move]) -> Option<Move> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_uci_int_tolerates_negative_and_overflow() {
+        assert_eq!(parse_uci_int("42"), Some(42));
+        assert_eq!(parse_uci_int("-5"), Some(0));
+        assert_eq!(parse_uci_int("99999999999999999999999"), Some(u64::MAX));
+        assert_eq!(parse_uci_int(""), None);
+        assert_eq!(parse_uci_int("-"), None);
+        assert_eq!(parse_uci_int("12ms"), None);
+        assert_eq!(parse_uci_int("+3"), None);
+    }
+
+    #[test]
+    fn go_with_negative_clock_keeps_the_time_control() {
+        match parse_command("go wtime -5 btime -120 winc -1") {
+            UciCommand::Go(p) => {
+                assert_eq!((p.wtime, p.btime, p.winc), (Some(0), Some(0), Some(0)));
+                assert!(!p.infinite);
+            }
+            _ => panic!("expected Go"),
+        }
+    }
+
+    #[test]
+    fn go_depth_saturates_instead_of_being_dropped() {
+        match parse_command("go depth 300") {
+            UciCommand::Go(p) => assert_eq!(p.depth, Some(u8::MAX)),
+            _ => panic!("expected Go"),
+        }
+    }
+
+    #[test]
+    fn hash_is_clamped_to_the_advertised_range() {
+        assert_eq!(clamp_hash_mb(0), HASH_MIN_MB);
+        assert_eq!(clamp_hash_mb(100_000_000), HASH_MAX_MB);
+        assert_eq!(clamp_hash_mb(128), 128);
+    }
 
     #[test]
     fn test_parse_uci() {

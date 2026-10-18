@@ -401,7 +401,7 @@ impl SearchEngine {
         let mut board = board.clone();
         board.enable_history();
 
-        let max_depth = max_depth.unwrap_or(MAX_DEPTH);
+        let max_depth = max_depth.unwrap_or(MAX_DEPTH).max(1);
         // Helpers with a stagger above the cap still search the cap.
         let start_depth = start_depth.clamp(1, max_depth);
 
@@ -449,6 +449,24 @@ impl SearchEngine {
                 self.extract_pv(&mut board, depth)
             };
             result.stats = self.stats.clone();
+        }
+
+        // Out of time before even depth 1 produced a move (tiny clock, or a
+        // search stopped immediately): still answer with a legal move rather
+        // than let the GUI receive `bestmove 0000`. No legal move at all means
+        // the game is over and the score from the search stands.
+        if result.best_move.is_none() {
+            let hash_move = self.get_hash_move(board.position_hash());
+            let legal = board.generate_legal_moves();
+            let fallback = hash_move
+                .filter(|m| legal.contains(m))
+                .or_else(|| legal.first().copied());
+            if let Some(mv) = fallback {
+                result.best_move = Some(mv);
+                result.pv = vec![mv];
+                result.score = 0;
+                result.depth = result.depth.max(1);
+            }
         }
 
         result
