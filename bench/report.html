@@ -1,0 +1,383 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Lemonate Record Progression</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+/* Layout: one column, summary cards first, then the record chart with a replay, then the table. */
+:root {
+  color-scheme: dark;
+  --display: "Chakra Petch", ui-sans-serif, system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --on-gold: #1a1405;
+  --bg: #0b0e14; --panel: #121722; --panel2: #171d2b; --line: #263042; --text: #d9e1ee; --dim: #7f8ca3;
+  --gold: #f5c542; --gold-dim: #8a6f1d; --good: #4ade80; --bad: #f87171; --dot: #5b6b87; --accent: #7cc4ff;
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    color-scheme: light;
+    --on-gold: #fffaf0;
+    --bg: #f4f1ea; --panel: #fffdf8; --panel2: #f0ebe0; --line: #d8d0bf; --text: #20242e; --dim: #6b7280;
+    --gold: #b7791f; --gold-dim: #e6c27a; --good: #15803d; --bad: #b91c1c; --dot: #8a94a6; --accent: #1d6fb8;
+  }
+}
+:root[data-theme="light"] {
+  color-scheme: light;
+  --on-gold: #fffaf0;
+  --bg: #f4f1ea; --panel: #fffdf8; --panel2: #f0ebe0; --line: #d8d0bf; --text: #20242e; --dim: #6b7280;
+  --gold: #b7791f; --gold-dim: #e6c27a; --good: #15803d; --bad: #b91c1c; --dot: #8a94a6; --accent: #1d6fb8;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--text); }
+body { font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  padding-block: 0 64px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+.mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+header { max-width: 1100px; margin: 0 auto; padding: 36px 0 12px; }
+h1 { margin: 0; font-family: var(--display); font-weight: 700; font-size: clamp(22px, 4vw, 34px); letter-spacing: .04em; text-transform: uppercase; text-wrap: balance; }
+h1 span { color: var(--gold); }
+.sub { color: var(--dim); margin-top: 4px; }
+main { max-width: 1100px; margin: 0 auto; }
+.tabs { display: flex; flex-wrap: wrap; gap: 8px; margin: 18px 0 14px; }
+.tab { font-family: var(--display); font-weight: 500; background: var(--panel); color: var(--dim); border: 1px solid var(--line); border-radius: 999px; padding: 6px 14px; cursor: pointer; font: inherit; }
+.tab[aria-selected="true"] { color: var(--bg); background: var(--gold); border-color: var(--gold); font-weight: 600; }
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px; margin-bottom: 14px; }
+.stat { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+.stat .k { font-family: var(--display); color: var(--dim); font-size: 12px; text-transform: uppercase; letter-spacing: .08em; }
+.stat .v { font-family: var(--mono); font-weight: 500; font-size: 24px; margin-top: 2px; }
+.stat .d { color: var(--dim); font-size: 12px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px; }
+.controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 8px; }
+button.btn { background: var(--panel2); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 6px 12px; cursor: pointer; font: inherit; }
+button.btn:hover { border-color: var(--gold); }
+button.primary { font-family: var(--display); background: var(--gold); color: var(--on-gold); border-color: var(--gold); font-weight: 700; }
+input[type=range] { flex: 1 1 200px; accent-color: var(--gold); }
+label.chk { color: var(--dim); display: flex; align-items: center; gap: 6px; }
+.chartwrap { position: relative; }
+svg { width: 100%; height: auto; display: block; }
+.axis text { fill: var(--dim); font-size: 11px; }
+.axis line, .axis path { stroke: var(--line); }
+.grid line { stroke: var(--line); stroke-opacity: .55; stroke-dasharray: 2 4; }
+.dot { fill: var(--dot); fill-opacity: .55; }
+.dot.reg { fill: none; stroke: var(--bad); stroke-width: 1.5; fill-opacity: 1; }
+.rec-line { fill: none; stroke: var(--gold); stroke-width: 3; stroke-linejoin: round; }
+.rec-mark { fill: var(--gold); stroke: var(--bg); stroke-width: 2; }
+.rec-label { fill: var(--gold); font-size: 11px; font-weight: 700; }
+.cursor { stroke: var(--accent); stroke-width: 1; stroke-dasharray: 4 4; }
+.tip { position: absolute; pointer-events: none; background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; font-size: 12px; max-width: 320px; display: none; z-index: 5; }
+.tip b { color: var(--gold); }
+.banner { position: absolute; left: 70px; top: 14px; right: 30px; pointer-events: none; opacity: 0; transition: opacity .25s; }
+.banner.on { opacity: 1; }
+.banner .box { display: inline-block; background: color-mix(in srgb, var(--panel) 92%, transparent); border: 1px solid var(--gold); border-radius: 12px; padding: 12px 18px; box-shadow: 0 8px 30px rgb(0 0 0 / .35); max-width: 100%; }
+.banner .nr { font-family: var(--display); color: var(--gold); font-weight: 800; letter-spacing: .18em; font-size: 12px; text-transform: uppercase; }
+.banner .big { font-family: var(--mono); font-size: clamp(28px, 6vw, 46px); font-weight: 600; line-height: 1.1; }
+.banner .delta { color: var(--good); font-size: 15px; }
+.banner .msg { font-size: 14px; margin-top: 4px; }
+.banner .who { color: var(--dim); font-size: 12px; }
+table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); font-size: 13px; vertical-align: top; }
+th { font-family: var(--display); color: var(--dim); font-weight: 600; text-transform: uppercase; font-size: 11px; letter-spacing: .08em; }
+td.num, th.num { text-align: right; }
+tr.current td { background: color-mix(in srgb, var(--gold) 9%, transparent); }
+tr.current td:first-child { box-shadow: inset 3px 0 var(--gold); }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+.good { color: var(--good); }
+h2 { font-family: var(--display); font-size: 15px; text-transform: uppercase; letter-spacing: .1em; color: var(--dim); margin: 26px 0 6px; }
+.foot { color: var(--dim); font-size: 12px; margin-top: 28px; line-height: 1.7; }
+.empty { padding: 40px; text-align: center; color: var(--dim); }
+@media (max-width: 640px) { .hide-sm { display: none; } th, td { padding: 6px 6px; } }
+@media (prefers-reduced-motion: reduce) { .banner { transition: none; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Lemonate <span>record progression</span></h1>
+  <div class="sub" id="sub"></div>
+</header>
+<main>
+  <div class="tabs" id="tabs" role="tablist"></div>
+  <div class="stats" id="stats"></div>
+  <div class="card">
+    <div class="controls">
+      <button class="btn primary" id="play">&#9654; Replay</button>
+      <button class="btn" id="restart" title="Back to the start">&#8634;</button>
+      <input type="range" id="scrub" min="0" max="0" step="1" value="0" aria-label="Scrub through records">
+      <button class="btn" id="speed" title="Playback speed">1&times;</button>
+      <label class="chk"><input type="checkbox" id="log"> log scale</label>
+    </div>
+    <div class="chartwrap" id="chartwrap">
+      <svg id="chart" viewBox="0 0 1000 460" role="img" aria-label="Record progression chart"></svg>
+      <div class="banner" id="banner"></div>
+      <div class="tip" id="tip"></div>
+    </div>
+  </div>
+  <h2>Record holders</h2>
+  <div class="card" style="overflow-x:auto"><table id="table"></table></div>
+  <div class="foot" id="foot"></div>
+</main>
+<script>
+const DATA = {"metrics":{"ttd_ms":{"label":"Time to depth 12","unit":"ms","lower":true,"points":[{"commit":"320c2efacf2fa36a20cf55b3f4c0eb6a86e4b5f5","short":"320c2ef","ts":1769192531,"author":"Toby Faucher","subject":"Implemented UCI","value":27390.07},{"commit":"a2108c3a367ad63cc183fa8e1b31bbd551dda10f","short":"a2108c3","ts":1789358266,"author":"Toby Faucher","subject":"Implement Lazy SMP parallel search","value":14808.69},{"commit":"288af392e729e7f3bb95c3cb5df9f3f7d26f6070","short":"288af39","ts":1789360520,"author":"Toby Faucher","subject":"feat: add EvalWeights struct consolidating tunable eval constants","value":14849.85},{"commit":"8d19f91d172894b9712988343f47b3bdba3114e5","short":"8d19f91","ts":1789360753,"author":"Toby Faucher","subject":"test: strengthen EvalWeights round-trip test to cover all fields","value":14893.9},{"commit":"e20538625f822626bfa8edf11d45054874c210d0","short":"e205386","ts":1789360905,"author":"Toby Faucher","subject":"feat: add weighted PST evaluation for the upcoming tuner","value":14780.46},{"commit":"0f8d81fc8d981f22d43309ad596a4f056c67bca5","short":"0f8d81f","ts":1789361109,"author":"Toby Faucher","subject":"feat: add weighted pawn structure evaluation for the upcoming tuner","value":14800.85},{"commit":"914b4728bd8696c6e91d51f0de16546cf843a712","short":"914b472","ts":1789361319,"author":"Toby Faucher","subject":"feat: add weighted king safety evaluation for the upcoming tuner","value":14808.68},{"commit":"d21ac3a99f17456585162327cd2f554e11d043ed","short":"d21ac3a","ts":1789361545,"author":"Toby Faucher","subject":"feat: add weighted mobility evaluation for the upcoming tuner","value":14765.74},{"commit":"38ae694c888f6ee8a23054c70aa53ff448e488ea","short":"38ae694","ts":1789361748,"author":"Toby Faucher","subject":"feat: add Evaluator::static_eval_white_pov for the tuner, verified bit-identical to pre-refactor scores","value":14826.74},{"commit":"a6912db60dd17274116ab26a4a72a884758efa5d","short":"a6912db","ts":1789361976,"author":"Toby Faucher","subject":"feat: add tuner binary scaffold with quiet-labeled EPD dataset loader","value":15133.22},{"commit":"c17f09e82e4fd972a7bdec653c4dfd212ebd9b99","short":"c17f09e","ts":1789362261,"author":"Toby Faucher","subject":"feat: add sigmoid MSE scoring and K grid-search to the tuner","value":15105.46},{"commit":"31de6aacd40df03f3b803bdd18cd9a1809b3aaba","short":"31de6aa","ts":1789362473,"author":"Toby Faucher","subject":"fix: move Board import to test module scope to eliminate unused import warning","value":15095.55},{"commit":"6d8aeac4b9451cce58a5793a65edb3e3500bc445","short":"6d8aeac","ts":1789362630,"author":"Toby Faucher","subject":"feat: add coordinate descent optimizer to the tuner","value":15086.54},{"commit":"2536b15adddfdf489db05a7da1eae8cc28df76f0","short":"2536b15","ts":1789362888,"author":"Toby Faucher","subject":"perf: parallelize tuner MSE computation across CPU cores with std::thread::scope","value":15095.95},{"commit":"e02e5a68e557d8b0cbe5c92ec50d011bbed0249a","short":"e02e5a6","ts":1789363208,"author":"Toby Faucher","subject":"feat: wire up tuner CLI with paste-ready const-block output","value":15168.54},{"commit":"498310d8139334f4ea26bc5395d9bc0b975dfac1","short":"498310d","ts":1789363450,"author":"Toby Faucher","subject":"test: add end-to-end synthetic-dataset pipeline test for the tuner","value":15112.18},{"commit":"bba508dc42275735bc7e27a2f6b1421dbea807e7","short":"bba508d","ts":1789398286,"author":"Toby Faucher","subject":"fix: address final review findings (fit_k bracket, Black-to-move test, dead code, warnings, stdout/stderr separation, doc note)","value":15179.16},{"commit":"0ad4a9868a0de66d3b7d1a041afc4d333c1cec70","short":"0ad4a98","ts":1791427216,"author":"Toby Faucher","subject":"Re-enable aspiration windows from depth 5","value":10443.17},{"commit":"67dec33183618d1290f4e63a285a9c92bd8308c7","short":"67dec33","ts":1791468190,"author":"Toby Faucher","subject":"Lower null-move base reduction from 3 to 2","value":11620.25},{"commit":"22f792368451402e8d6e97bfce5080fb586bd31f","short":"22f7923","ts":1791499810,"author":"Toby Faucher","subject":"Start LMR one move earlier (LMR_FULL_DEPTH_MOVES 4 -> 3)","value":12681.05},{"commit":"b8d1daf780806185cbd10fe8578c429b87c5ae9a","short":"b8d1daf","ts":1791552954,"author":"Toby Faucher","subject":"Add reverse futility pruning to negamax","value":8342.76},{"commit":"3b9c65526664fd8ea3f54a45cfd7761d3ffb3643","short":"3b9c655","ts":1791601675,"author":"Toby Faucher","subject":"Add internal iterative reduction at depth>=4 without hash move","value":7486.81}],"records":[{"commit":"320c2efacf2fa36a20cf55b3f4c0eb6a86e4b5f5","short":"320c2ef","ts":1769192531,"author":"Toby Faucher","subject":"Implemented UCI","value":27390.07,"previous":null,"improvement_pct":null,"held_days":233.4},{"commit":"a2108c3a367ad63cc183fa8e1b31bbd551dda10f","short":"a2108c3","ts":1789358266,"author":"Toby Faucher","subject":"Implement Lazy SMP parallel search","value":14808.69,"previous":27390.07,"improvement_pct":45.93409217282029,"held_days":23.9},{"commit":"0ad4a9868a0de66d3b7d1a041afc4d333c1cec70","short":"0ad4a98","ts":1791427216,"author":"Toby Faucher","subject":"Re-enable aspiration windows from depth 5","value":10443.17,"previous":14808.69,"improvement_pct":29.47944754059948,"held_days":1.5},{"commit":"b8d1daf780806185cbd10fe8578c429b87c5ae9a","short":"b8d1daf","ts":1791552954,"author":"Toby Faucher","subject":"Add reverse futility pruning to negamax","value":8342.76,"previous":10443.17,"improvement_pct":20.11276269561828,"held_days":0.6},{"commit":"3b9c65526664fd8ea3f54a45cfd7761d3ffb3643","short":"3b9c655","ts":1791601675,"author":"Toby Faucher","subject":"Add internal iterative reduction at depth>=4 without hash move","value":7486.81,"previous":8342.76,"improvement_pct":10.259794120890442,"held_days":8.9,"current":true}]},"ttd_light_ms":{"label":"Time to depth 7","unit":"ms","lower":true,"points":[{"commit":"320c2efacf2fa36a20cf55b3f4c0eb6a86e4b5f5","short":"320c2ef","ts":1769192531,"author":"Toby Faucher","subject":"Implemented UCI","value":413.48},{"commit":"a2108c3a367ad63cc183fa8e1b31bbd551dda10f","short":"a2108c3","ts":1789358266,"author":"Toby Faucher","subject":"Implement Lazy SMP parallel search","value":318.11},{"commit":"288af392e729e7f3bb95c3cb5df9f3f7d26f6070","short":"288af39","ts":1789360520,"author":"Toby Faucher","subject":"feat: add EvalWeights struct consolidating tunable eval constants","value":318.55},{"commit":"8d19f91d172894b9712988343f47b3bdba3114e5","short":"8d19f91","ts":1789360753,"author":"Toby Faucher","subject":"test: strengthen EvalWeights round-trip test to cover all fields","value":315.43},{"commit":"e20538625f822626bfa8edf11d45054874c210d0","short":"e205386","ts":1789360905,"author":"Toby Faucher","subject":"feat: add weighted PST evaluation for the upcoming tuner","value":319.79},{"commit":"0f8d81fc8d981f22d43309ad596a4f056c67bca5","short":"0f8d81f","ts":1789361109,"author":"Toby Faucher","subject":"feat: add weighted pawn structure evaluation for the upcoming tuner","value":317.47},{"commit":"914b4728bd8696c6e91d51f0de16546cf843a712","short":"914b472","ts":1789361319,"author":"Toby Faucher","subject":"feat: add weighted king safety evaluation for the upcoming tuner","value":319.36},{"commit":"d21ac3a99f17456585162327cd2f554e11d043ed","short":"d21ac3a","ts":1789361545,"author":"Toby Faucher","subject":"feat: add weighted mobility evaluation for the upcoming tuner","value":315.33},{"commit":"38ae694c888f6ee8a23054c70aa53ff448e488ea","short":"38ae694","ts":1789361748,"author":"Toby Faucher","subject":"feat: add Evaluator::static_eval_white_pov for the tuner, verified bit-identical to pre-refactor scores","value":317.37},{"commit":"a6912db60dd17274116ab26a4a72a884758efa5d","short":"a6912db","ts":1789361976,"author":"Toby Faucher","subject":"feat: add tuner binary scaffold with quiet-labeled EPD dataset loader","value":322.41},{"commit":"c17f09e82e4fd972a7bdec653c4dfd212ebd9b99","short":"c17f09e","ts":1789362261,"author":"Toby Faucher","subject":"feat: add sigmoid MSE scoring and K grid-search to the tuner","value":324.08},{"commit":"31de6aacd40df03f3b803bdd18cd9a1809b3aaba","short":"31de6aa","ts":1789362473,"author":"Toby Faucher","subject":"fix: move Board import to test module scope to eliminate unused import warning","value":321.77},{"commit":"6d8aeac4b9451cce58a5793a65edb3e3500bc445","short":"6d8aeac","ts":1789362630,"author":"Toby Faucher","subject":"feat: add coordinate descent optimizer to the tuner","value":334.49},{"commit":"2536b15adddfdf489db05a7da1eae8cc28df76f0","short":"2536b15","ts":1789362888,"author":"Toby Faucher","subject":"perf: parallelize tuner MSE computation across CPU cores with std::thread::scope","value":330.89},{"commit":"e02e5a68e557d8b0cbe5c92ec50d011bbed0249a","short":"e02e5a6","ts":1789363208,"author":"Toby Faucher","subject":"feat: wire up tuner CLI with paste-ready const-block output","value":321.71},{"commit":"498310d8139334f4ea26bc5395d9bc0b975dfac1","short":"498310d","ts":1789363450,"author":"Toby Faucher","subject":"test: add end-to-end synthetic-dataset pipeline test for the tuner","value":323.16},{"commit":"bba508dc42275735bc7e27a2f6b1421dbea807e7","short":"bba508d","ts":1789398286,"author":"Toby Faucher","subject":"fix: address final review findings (fit_k bracket, Black-to-move test, dead code, warnings, stdout/stderr separation, doc note)","value":322.29},{"commit":"0ad4a9868a0de66d3b7d1a041afc4d333c1cec70","short":"0ad4a98","ts":1791427216,"author":"Toby Faucher","subject":"Re-enable aspiration windows from depth 5","value":281.47},{"commit":"67dec33183618d1290f4e63a285a9c92bd8308c7","short":"67dec33","ts":1791468190,"author":"Toby Faucher","subject":"Lower null-move base reduction from 3 to 2","value":302.93},{"commit":"22f792368451402e8d6e97bfce5080fb586bd31f","short":"22f7923","ts":1791499810,"author":"Toby Faucher","subject":"Start LMR one move earlier (LMR_FULL_DEPTH_MOVES 4 -> 3)","value":299.23},{"commit":"b8d1daf780806185cbd10fe8578c429b87c5ae9a","short":"b8d1daf","ts":1791552954,"author":"Toby Faucher","subject":"Add reverse futility pruning to negamax","value":280.77},{"commit":"3b9c65526664fd8ea3f54a45cfd7761d3ffb3643","short":"3b9c655","ts":1791601675,"author":"Toby Faucher","subject":"Add internal iterative reduction at depth>=4 without hash move","value":273.26}],"records":[{"commit":"320c2efacf2fa36a20cf55b3f4c0eb6a86e4b5f5","short":"320c2ef","ts":1769192531,"author":"Toby Faucher","subject":"Implemented UCI","value":413.48,"previous":null,"improvement_pct":null,"held_days":233.4},{"commit":"a2108c3a367ad63cc183fa8e1b31bbd551dda10f","short":"a2108c3","ts":1789358266,"author":"Toby Faucher","subject":"Implement Lazy SMP parallel search","value":318.11,"previous":413.48,"improvement_pct":23.065202670020312,"held_days":23.9},{"commit":"0ad4a9868a0de66d3b7d1a041afc4d333c1cec70","short":"0ad4a98","ts":1791427216,"author":"Toby Faucher","subject":"Re-enable aspiration windows from depth 5","value":281.47,"previous":318.11,"improvement_pct":11.518028354971543,"held_days":10.9,"current":true}]},"nps":{"label":"Nodes per second","unit":"nps","lower":false,"points":[{"commit":"320c2efacf2fa36a20cf55b3f4c0eb6a86e4b5f5","short":"320c2ef","ts":1769192531,"author":"Toby Faucher","subject":"Implemented UCI","value":367291},{"commit":"a2108c3a367ad63cc183fa8e1b31bbd551dda10f","short":"a2108c3","ts":1789358266,"author":"Toby Faucher","subject":"Implement Lazy SMP parallel search","value":381144},{"commit":"288af392e729e7f3bb95c3cb5df9f3f7d26f6070","short":"288af39","ts":1789360520,"author":"Toby Faucher","subject":"feat: add EvalWeights struct consolidating tunable eval constants","value":381448},{"commit":"8d19f91d172894b9712988343f47b3bdba3114e5","short":"8d19f91","ts":1789360753,"author":"Toby Faucher","subject":"test: strengthen EvalWeights round-trip test to cover all fields","value":381561},{"commit":"e20538625f822626bfa8edf11d45054874c210d0","short":"e205386","ts":1789360905,"author":"Toby Faucher","subject":"feat: add weighted PST evaluation for the upcoming tuner","value":382845},{"commit":"0f8d81fc8d981f22d43309ad596a4f056c67bca5","short":"0f8d81f","ts":1789361109,"author":"Toby Faucher","subject":"feat: add weighted pawn structure evaluation for the upcoming tuner","value":382539},{"commit":"914b4728bd8696c6e91d51f0de16546cf843a712","short":"914b472","ts":1789361319,"author":"Toby Faucher","subject":"feat: add weighted king safety evaluation for the upcoming tuner","value":382376},{"commit":"d21ac3a99f17456585162327cd2f554e11d043ed","short":"d21ac3a","ts":1789361545,"author":"Toby Faucher","subject":"feat: add weighted mobility evaluation for the upcoming tuner","value":382044},{"commit":"38ae694c888f6ee8a23054c70aa53ff448e488ea","short":"38ae694","ts":1789361748,"author":"Toby Faucher","subject":"feat: add Evaluator::static_eval_white_pov for the tuner, verified bit-identical to pre-refactor scores","value":380846},{"commit":"a6912db60dd17274116ab26a4a72a884758efa5d","short":"a6912db","ts":1789361976,"author":"Toby Faucher","subject":"feat: add tuner binary scaffold with quiet-labeled EPD dataset loader","value":375103},{"commit":"c17f09e82e4fd972a7bdec653c4dfd212ebd9b99","short":"c17f09e","ts":1789362261,"author":"Toby Faucher","subject":"feat: add sigmoid MSE scoring and K grid-search to the tuner","value":375074},{"commit":"31de6aacd40df03f3b803bdd18cd9a1809b3aaba","short":"31de6aa","ts":1789362473,"author":"Toby Faucher","subject":"fix: move Board import to test module scope to eliminate unused import warning","value":375444},{"commit":"6d8aeac4b9451cce58a5793a65edb3e3500bc445","short":"6d8aeac","ts":1789362630,"author":"Toby Faucher","subject":"feat: add coordinate descent optimizer to the tuner","value":374239},{"commit":"2536b15adddfdf489db05a7da1eae8cc28df76f0","short":"2536b15","ts":1789362888,"author":"Toby Faucher","subject":"perf: parallelize tuner MSE computation across CPU cores with std::thread::scope","value":374679},{"commit":"e02e5a68e557d8b0cbe5c92ec50d011bbed0249a","short":"e02e5a6","ts":1789363208,"author":"Toby Faucher","subject":"feat: wire up tuner CLI with paste-ready const-block output","value":375188},{"commit":"498310d8139334f4ea26bc5395d9bc0b975dfac1","short":"498310d","ts":1789363450,"author":"Toby Faucher","subject":"test: add end-to-end synthetic-dataset pipeline test for the tuner","value":374024},{"commit":"bba508dc42275735bc7e27a2f6b1421dbea807e7","short":"bba508d","ts":1789398286,"author":"Toby Faucher","subject":"fix: address final review findings (fit_k bracket, Black-to-move test, dead code, warnings, stdout/stderr separation, doc note)","value":374026},{"commit":"0ad4a9868a0de66d3b7d1a041afc4d333c1cec70","short":"0ad4a98","ts":1791427216,"author":"Toby Faucher","subject":"Re-enable aspiration windows from depth 5","value":490118},{"commit":"67dec33183618d1290f4e63a285a9c92bd8308c7","short":"67dec33","ts":1791468190,"author":"Toby Faucher","subject":"Lower null-move base reduction from 3 to 2","value":523511},{"commit":"22f792368451402e8d6e97bfce5080fb586bd31f","short":"22f7923","ts":1791499810,"author":"Toby Faucher","subject":"Start LMR one move earlier (LMR_FULL_DEPTH_MOVES 4 -> 3)","value":425574},{"commit":"b8d1daf780806185cbd10fe8578c429b87c5ae9a","short":"b8d1daf","ts":1791552954,"author":"Toby Faucher","subject":"Add reverse futility pruning to negamax","value":471766},{"commit":"3b9c65526664fd8ea3f54a45cfd7761d3ffb3643","short":"3b9c655","ts":1791601675,"author":"Toby Faucher","subject":"Add internal iterative reduction at depth>=4 without hash move","value":485162}],"records":[{"commit":"320c2efacf2fa36a20cf55b3f4c0eb6a86e4b5f5","short":"320c2ef","ts":1769192531,"author":"Toby Faucher","subject":"Implemented UCI","value":367291,"previous":null,"improvement_pct":null,"held_days":233.4},{"commit":"a2108c3a367ad63cc183fa8e1b31bbd551dda10f","short":"a2108c3","ts":1789358266,"author":"Toby Faucher","subject":"Implement Lazy SMP parallel search","value":381144,"previous":367291,"improvement_pct":3.7716687857856535,"held_days":23.9},{"commit":"0ad4a9868a0de66d3b7d1a041afc4d333c1cec70","short":"0ad4a98","ts":1791427216,"author":"Toby Faucher","subject":"Re-enable aspiration windows from depth 5","value":490118,"previous":381144,"improvement_pct":28.59129357932959,"held_days":0.5},{"commit":"67dec33183618d1290f4e63a285a9c92bd8308c7","short":"67dec33","ts":1791468190,"author":"Toby Faucher","subject":"Lower null-move base reduction from 3 to 2","value":523511,"previous":490118,"improvement_pct":6.813257215609303,"held_days":10.4,"current":true}]},"nodes":{"label":"Nodes to depth","unit":"nodes","lower":true,"points":[{"commit":"320c2efacf2fa36a20cf55b3f4c0eb6a86e4b5f5","short":"320c2ef","ts":1769192531,"author":"Toby Faucher","subject":"Implemented UCI","value":8113795},{"commit":"a2108c3a367ad63cc183fa8e1b31bbd551dda10f","short":"a2108c3","ts":1789358266,"author":"Toby Faucher","subject":"Implement Lazy SMP parallel search","value":7142798},{"commit":"288af392e729e7f3bb95c3cb5df9f3f7d26f6070","short":"288af39","ts":1789360520,"author":"Toby Faucher","subject":"feat: add EvalWeights struct consolidating tunable eval constants","value":7142798},{"commit":"8d19f91d172894b9712988343f47b3bdba3114e5","short":"8d19f91","ts":1789360753,"author":"Toby Faucher","subject":"test: strengthen EvalWeights round-trip test to cover all fields","value":7142798},{"commit":"e20538625f822626bfa8edf11d45054874c210d0","short":"e205386","ts":1789360905,"author":"Toby Faucher","subject":"feat: add weighted PST evaluation for the upcoming tuner","value":7142798},{"commit":"0f8d81fc8d981f22d43309ad596a4f056c67bca5","short":"0f8d81f","ts":1789361109,"author":"Toby Faucher","subject":"feat: add weighted pawn structure evaluation for the upcoming tuner","value":7142798},{"commit":"914b4728bd8696c6e91d51f0de16546cf843a712","short":"914b472","ts":1789361319,"author":"Toby Faucher","subject":"feat: add weighted king safety evaluation for the upcoming tuner","value":7142798},{"commit":"d21ac3a99f17456585162327cd2f554e11d043ed","short":"d21ac3a","ts":1789361545,"author":"Toby Faucher","subject":"feat: add weighted mobility evaluation for the upcoming tuner","value":7142798},{"commit":"38ae694c888f6ee8a23054c70aa53ff448e488ea","short":"38ae694","ts":1789361748,"author":"Toby Faucher","subject":"feat: add Evaluator::static_eval_white_pov for the tuner, verified bit-identical to pre-refactor scores","value":7142798},{"commit":"a6912db60dd17274116ab26a4a72a884758efa5d","short":"a6912db","ts":1789361976,"author":"Toby Faucher","subject":"feat: add tuner binary scaffold with quiet-labeled EPD dataset loader","value":7142798},{"commit":"c17f09e82e4fd972a7bdec653c4dfd212ebd9b99","short":"c17f09e","ts":1789362261,"author":"Toby Faucher","subject":"feat: add sigmoid MSE scoring and K grid-search to the tuner","value":7142798},{"commit":"31de6aacd40df03f3b803bdd18cd9a1809b3aaba","short":"31de6aa","ts":1789362473,"author":"Toby Faucher","subject":"fix: move Board import to test module scope to eliminate unused import warning","value":7142798},{"commit":"6d8aeac4b9451cce58a5793a65edb3e3500bc445","short":"6d8aeac","ts":1789362630,"author":"Toby Faucher","subject":"feat: add coordinate descent optimizer to the tuner","value":7142798},{"commit":"2536b15adddfdf489db05a7da1eae8cc28df76f0","short":"2536b15","ts":1789362888,"author":"Toby Faucher","subject":"perf: parallelize tuner MSE computation across CPU cores with std::thread::scope","value":7142798},{"commit":"e02e5a68e557d8b0cbe5c92ec50d011bbed0249a","short":"e02e5a6","ts":1789363208,"author":"Toby Faucher","subject":"feat: wire up tuner CLI with paste-ready const-block output","value":7142798},{"commit":"498310d8139334f4ea26bc5395d9bc0b975dfac1","short":"498310d","ts":1789363450,"author":"Toby Faucher","subject":"test: add end-to-end synthetic-dataset pipeline test for the tuner","value":7142798},{"commit":"bba508dc42275735bc7e27a2f6b1421dbea807e7","short":"bba508d","ts":1789398286,"author":"Toby Faucher","subject":"fix: address final review findings (fit_k bracket, Black-to-move test, dead code, warnings, stdout/stderr separation, doc note)","value":7142798},{"commit":"0ad4a9868a0de66d3b7d1a041afc4d333c1cec70","short":"0ad4a98","ts":1791427216,"author":"Toby Faucher","subject":"Re-enable aspiration windows from depth 5","value":4748316},{"commit":"67dec33183618d1290f4e63a285a9c92bd8308c7","short":"67dec33","ts":1791468190,"author":"Toby Faucher","subject":"Lower null-move base reduction from 3 to 2","value":5270231},{"commit":"22f792368451402e8d6e97bfce5080fb586bd31f","short":"22f7923","ts":1791499810,"author":"Toby Faucher","subject":"Start LMR one move earlier (LMR_FULL_DEPTH_MOVES 4 -> 3)","value":5457972},{"commit":"b8d1daf780806185cbd10fe8578c429b87c5ae9a","short":"b8d1daf","ts":1791552954,"author":"Toby Faucher","subject":"Add reverse futility pruning to negamax","value":4389507},{"commit":"3b9c65526664fd8ea3f54a45cfd7761d3ffb3643","short":"3b9c655","ts":1791601675,"author":"Toby Faucher","subject":"Add internal iterative reduction at depth>=4 without hash move","value":3928027}],"records":[{"commit":"320c2efacf2fa36a20cf55b3f4c0eb6a86e4b5f5","short":"320c2ef","ts":1769192531,"author":"Toby Faucher","subject":"Implemented UCI","value":8113795,"previous":null,"improvement_pct":null,"held_days":233.4},{"commit":"a2108c3a367ad63cc183fa8e1b31bbd551dda10f","short":"a2108c3","ts":1789358266,"author":"Toby Faucher","subject":"Implement Lazy SMP parallel search","value":7142798,"previous":8113795,"improvement_pct":11.967236046757401,"held_days":23.9},{"commit":"0ad4a9868a0de66d3b7d1a041afc4d333c1cec70","short":"0ad4a98","ts":1791427216,"author":"Toby Faucher","subject":"Re-enable aspiration windows from depth 5","value":4748316,"previous":7142798,"improvement_pct":33.52302557065172,"held_days":1.5},{"commit":"b8d1daf780806185cbd10fe8578c429b87c5ae9a","short":"b8d1daf","ts":1791552954,"author":"Toby Faucher","subject":"Add reverse futility pruning to negamax","value":4389507,"previous":4748316,"improvement_pct":7.55655268099259,"held_days":0.6},{"commit":"3b9c65526664fd8ea3f54a45cfd7761d3ffb3643","short":"3b9c655","ts":1791601675,"author":"Toby Faucher","subject":"Add internal iterative reduction at depth>=4 without hash move","value":3928027,"previous":4389507,"improvement_pct":10.513253538495327,"held_days":8.9,"current":true}]}},"meta":{"generated":1792366772,"repo":"https://github.com/Toby-Faucher/lemonate","env":{"host":"bawn","cpu":"12th Gen Intel(R) Core(TM) i7-12700","governor":"powersave","kernel":"7.2.9-arch1-1","image":"docker.io/library/rust:1.98.1-slim","load1":1.82,"pinned_cpu":14,"drift":0.9735},"anchor":{"srchash":"a2ddd18ed518d83c","ttd_ms":27390.07,"nps":367291,"set":"2026-10-18 16:59:13"},"commits":146,"statuses":{"no-uci":61,"build-failed":28,"ok":57},"depth":12,"depth_light":7,"movetime_ms":400,"passes":5,"image":"docker.io/library/rust:1.98.1-slim"}};
+const $ = (id) => document.getElementById(id);
+const NS = "http://www.w3.org/2000/svg";
+const W = 1000, H = 460, M = { l: 70, r: 30, t: 24, b: 40 };
+let metric = Object.keys(DATA.metrics).find((k) => DATA.metrics[k].records.length) || Object.keys(DATA.metrics)[0];
+let showUpTo = Infinity;       // timestamp cursor (replay)
+let useLog = false;
+let timer = null, speed = 1;
+
+function fmtVal(v, m) {
+  if (v == null) return "–";
+  if (m.unit === "ms") return v >= 1000 ? (v / 1000).toFixed(2) + " s" : Math.round(v) + " ms";
+  if (m.unit === "nps") return v >= 1e6 ? (v / 1e6).toFixed(2) + "M nps" : Math.round(v / 1000) + "k nps";
+  if (m.unit === "nodes") return v >= 1e6 ? (v / 1e6).toFixed(2) + "M" : Math.round(v / 1000) + "k";
+  return String(v);
+}
+const fmtDate = (ts) => new Date(ts * 1000).toISOString().slice(0, 10);
+const commitLink = (p) => DATA.meta.repo ? `<a href="${DATA.meta.repo}/commit/${p.commit}" target="_blank" rel="noopener">${p.short}</a>` : p.short;
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+function el(name, attrs, parent) {
+  const e = document.createElementNS(NS, name);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  if (parent) parent.appendChild(e);
+  return e;
+}
+
+function niceTicks(lo, hi, n) {
+  const span = hi - lo || 1, step0 = span / n, mag = Math.pow(10, Math.floor(Math.log10(step0)));
+  const step = [1, 2, 2.5, 5, 10].map((s) => s * mag).find((s) => s >= step0) || mag * 10;
+  const out = [];
+  for (let v = Math.ceil(lo / step) * step; v <= hi + 1e-9; v += step) out.push(v);
+  return out;
+}
+
+function tabs() {
+  const t = $("tabs");
+  t.innerHTML = "";
+  for (const k in DATA.metrics) {
+    const b = document.createElement("button");
+    b.className = "tab"; b.role = "tab"; b.textContent = DATA.metrics[k].label;
+    b.setAttribute("aria-selected", k === metric);
+    b.onclick = () => { stop(); metric = k; showUpTo = Infinity; draw(); };
+    t.appendChild(b);
+  }
+}
+
+function stats(m) {
+  const recs = m.records, s = $("stats");
+  if (recs.length < 1) { s.innerHTML = ""; return; }
+  const first = recs[0], cur = recs[recs.length - 1];
+  const ratio = m.lower ? first.value / cur.value : cur.value / first.value;
+  let big = recs.filter((r) => r.improvement_pct != null).sort((a, b) => b.improvement_pct - a.improvement_pct)[0];
+  let long = recs.slice(0, -1).sort((a, b) => (b.held_days || 0) - (a.held_days || 0))[0];
+  const card = (k, v, d) => `<div class="stat"><div class="k">${k}</div><div class="v mono">${v}</div><div class="d">${d || ""}</div></div>`;
+  s.innerHTML =
+    card("Current record", fmtVal(cur.value, m), `${commitLink(cur)} · ${fmtDate(cur.ts)}`) +
+    card("Since the first measurement", ratio.toFixed(2) + "&times;", `${fmtVal(first.value, m)} &rarr; ${fmtVal(cur.value, m)}`) +
+    card("Records broken", recs.length, `${m.points.length} versions measured`) +
+    (big ? card("Biggest single jump", (m.lower ? "&minus;" : "+") + big.improvement_pct.toFixed(1) + "%", esc(big.subject.slice(0, 44))) : "") +
+    (long ? card("Longest-standing record", Math.round(long.held_days) + " days", `${fmtVal(long.value, m)} · ${commitLink(long)}`) : "");
+}
+
+function draw() {
+  tabs();
+  const m = DATA.metrics[metric], svg = $("chart");
+  svg.innerHTML = "";
+  stats(m);
+  table(m);
+  const pts = m.points;
+  if (!pts.length) {
+    $("banner").classList.remove("on");
+    svg.innerHTML = '<text x="500" y="230" text-anchor="middle" fill="currentColor" style="fill:var(--dim)">No data for this category yet. Run: bench/bench.py history</text>';
+    $("scrub").max = 0;
+    return;
+  }
+  const t0 = pts[0].ts, t1 = Math.max(pts[pts.length - 1].ts, DATA.meta.generated);
+  const vals = pts.map((p) => p.value);
+  let lo = Math.min(...vals), hi = Math.max(...vals);
+  const logOk = useLog && lo > 0;
+  const f = (v) => logOk ? Math.log10(v) : v;
+  let ylo = logOk ? f(lo) - 0.05 : 0, yhi = f(hi) + (logOk ? 0.05 : (hi - lo) * 0.06 + 1e-9);
+  const X = (ts) => M.l + (ts - t0) / (t1 - t0 || 1) * (W - M.l - M.r);
+  const Y = (v) => H - M.b - (f(v) - ylo) / (yhi - ylo || 1) * (H - M.t - M.b);
+
+  // grid + axes
+  const g = el("g", { class: "grid axis" }, svg);
+  const yt = logOk ? [] : niceTicks(0, hi, 5);
+  if (logOk) { for (let e = Math.floor(f(lo)); e <= Math.ceil(f(hi)); e++) for (const k of [1, 2, 5]) { const v = k * Math.pow(10, e); if (v >= lo * 0.9 && v <= hi * 1.1) yt.push(v); } }
+  yt.forEach((v) => {
+    el("line", { x1: M.l, x2: W - M.r, y1: Y(v), y2: Y(v) }, g);
+    const tx = el("text", { x: M.l - 8, y: Y(v) + 4, "text-anchor": "end" }, g); tx.textContent = fmtVal(v, m);
+  });
+  const d0 = new Date(t0 * 1000), months = [];
+  for (let d = new Date(Date.UTC(d0.getUTCFullYear(), d0.getUTCMonth() + 1, 1)); d.getTime() / 1000 < t1; d.setUTCMonth(d.getUTCMonth() + 1)) months.push(new Date(d));
+  const every = months.length > 14 ? 3 : 1;
+  months.forEach((d, i) => {
+    if (i % every) return;
+    const x = X(d.getTime() / 1000);
+    el("line", { x1: x, x2: x, y1: H - M.b, y2: H - M.b + 5 }, g);
+    const tx = el("text", { x, y: H - M.b + 18, "text-anchor": "middle" }, g);
+    tx.textContent = d.toISOString().slice(0, 7);
+  });
+
+  const visible = pts.filter((p) => p.ts <= showUpTo);
+  const recs = m.records.filter((r) => r.ts <= showUpTo);
+  const recSet = new Set(recs.map((r) => r.commit));
+  // regressions: noticeably worse than the previous measured version
+  let prev = null;
+  visible.forEach((p) => {
+    const worse = prev && (m.lower ? p.value > prev.value * 1.08 : p.value < prev.value * 0.92);
+    p._reg = !!worse; prev = p;
+  });
+  const tip = $("tip"), wrap = $("chartwrap");
+  const showTip = (ev, p) => {
+    const r = wrap.getBoundingClientRect();
+    tip.innerHTML = `<b>${esc(p.short)}</b> &middot; ${fmtDate(p.ts)}<br>${esc(p.subject)}<br><span class="mono">${fmtVal(p.value, m)}</span> &middot; ${esc(p.author)}`;
+    tip.style.display = "block";
+    tip.style.left = Math.min(ev.clientX - r.left + 14, r.width - 330) + "px";
+    tip.style.top = (ev.clientY - r.top + 14) + "px";
+  };
+  visible.forEach((p) => {
+    if (recSet.has(p.commit)) return;
+    const c = el("circle", { cx: X(p.ts), cy: Y(p.value), r: p._reg ? 4.5 : 3, class: "dot" + (p._reg ? " reg" : "") }, svg);
+    c.addEventListener("mousemove", (e) => showTip(e, p));
+    c.addEventListener("mouseleave", () => (tip.style.display = "none"));
+  });
+
+  // stepped record line
+  if (recs.length) {
+    const end = Math.min(showUpTo, t1);
+    let d = `M ${X(recs[0].ts)} ${Y(recs[0].value)}`;
+    for (let i = 1; i < recs.length; i++) d += ` H ${X(recs[i].ts)} V ${Y(recs[i].value)}`;
+    d += ` H ${X(end)}`;
+    el("path", { d, class: "rec-line" }, svg);
+    recs.forEach((r, i) => {
+      const c = el("circle", { cx: X(r.ts), cy: Y(r.value), r: 6.5, class: "rec-mark" }, svg);
+      c.addEventListener("mousemove", (e) => showTip(e, r));
+      c.addEventListener("mouseleave", () => (tip.style.display = "none"));
+      if (r.improvement_pct != null && r.improvement_pct >= 3) {
+        const up = m.lower;
+        const tx = el("text", { x: X(r.ts), y: Y(r.value) + (up ? 22 : -14), "text-anchor": "middle", class: "rec-label" }, svg);
+        tx.textContent = (m.lower ? "−" : "+") + r.improvement_pct.toFixed(0) + "%";
+      }
+    });
+  }
+  if (isFinite(showUpTo) && showUpTo < t1) el("line", { x1: X(showUpTo), x2: X(showUpTo), y1: M.t, y2: H - M.b, class: "cursor" }, svg);
+  $("scrub").max = m.records.length - 1;
+  $("sub").textContent = `${m.label} · ${m.lower ? "lower" : "higher"} is better · ${pts.length} versions · ${fmtDate(t0)} → ${fmtDate(pts[pts.length - 1].ts)}`;
+}
+
+function table(m) {
+  const recs = m.records, t = $("table");
+  if (!recs.length) { t.innerHTML = '<tr><td class="empty">No records yet.</td></tr>'; return; }
+  let h = '<tr><th>#</th><th>Date</th><th>Commit</th><th class="num">Result</th><th class="num">Change</th><th class="num hide-sm">Held</th><th>What changed</th></tr>';
+  recs.forEach((r, i) => {
+    const imp = r.improvement_pct == null ? "–" : `<span class="good">${m.lower ? "−" : "+"}${r.improvement_pct.toFixed(1)}%</span>`;
+    h += `<tr class="${r.current ? "current" : ""}"><td class="mono">${i + 1}</td><td class="mono">${fmtDate(r.ts)}</td><td class="mono">${commitLink(r)}</td>` +
+      `<td class="num mono">${fmtVal(r.value, m)}</td><td class="num mono">${imp}</td>` +
+      `<td class="num mono hide-sm">${r.current ? "now" : Math.round(r.held_days || 0) + " d"}</td><td>${esc(r.subject)}<div class="who">${esc(r.author)}</div></td></tr>`;
+  });
+  t.innerHTML = h;
+}
+
+// ---- replay
+function banner(r, m, from) {
+  const b = $("banner");
+  const imp = r.improvement_pct == null ? "First measurement" : `${fmtVal(r.previous, m)} &rarr; ${fmtVal(r.value, m)} &nbsp;(${m.lower ? "−" : "+"}${r.improvement_pct.toFixed(1)}%)`;
+  const heldPrev = (m.records[m.records.indexOf(r) - 1] || {}).held_days;
+  b.innerHTML = `<div class="box"><div class="nr">${r.improvement_pct == null ? "Baseline" : "New record"} #${m.records.indexOf(r) + 1}</div>` +
+    `<div class="big mono" id="bignum">${fmtVal(from, m)}</div><div class="delta mono">${imp}</div>` +
+    `<div class="msg">${esc(r.subject)}</div><div class="who">${esc(r.author)} · ${commitLink(r)} · ${fmtDate(r.ts)}` +
+    `${heldPrev != null ? " · previous record stood for " + Math.round(heldPrev) + " days" : ""}</div></div>`;
+  b.classList.add("on");
+  // count the headline number down/up to the new value
+  const t0 = performance.now(), dur = 700 / speed, to = r.value;
+  const tick = (now) => {
+    const k = Math.min(1, (now - t0) / dur), e = 1 - Math.pow(1 - k, 3);
+    const n = $("bignum"); if (!n) return;
+    n.textContent = fmtVal(from + (to - from) * e, m);
+    if (k < 1) requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+}
+
+function stop() {
+  if (timer) clearTimeout(timer);
+  timer = null;
+  $("play").innerHTML = "&#9654; Replay";
+  $("banner").classList.remove("on");
+}
+
+function tween(from, to, ms, step, done) {
+  const t0 = performance.now();
+  const f = (now) => {
+    if (!timer) return;
+    const k = Math.min(1, (now - t0) / (ms / speed));
+    step(from + (to - from) * k);
+    if (k < 1) requestAnimationFrame(f); else done();
+  };
+  requestAnimationFrame(f);
+}
+
+function play(startIdx) {
+  const m = DATA.metrics[metric];
+  if (!m.records.length) return;
+  stop();
+  timer = setTimeout(() => {}, 0);
+  $("play").innerHTML = "&#10074;&#10074; Pause";
+  const recs = m.records, firstTs = m.points[0].ts;
+  let i = startIdx || 0;
+  showUpTo = i === 0 ? firstTs : recs[i - 1].ts;
+  draw();
+  const next = () => {
+    if (!timer) return;
+    if (i >= recs.length) {
+      // run on to "now" and finish
+      tween(showUpTo, DATA.meta.generated, 1200, (v) => { showUpTo = v; draw(); }, () => { showUpTo = Infinity; draw(); stop(); });
+      return;
+    }
+    const r = recs[i], from = i ? recs[i - 1].value : r.value;
+    $("banner").classList.remove("on");
+    tween(showUpTo, r.ts, i === 0 ? 300 : 1300, (v) => { showUpTo = v; draw(); }, () => {
+      showUpTo = r.ts; draw(); $("scrub").value = i;
+      banner(r, m, from);
+      i++;
+      timer = setTimeout(next, (i >= recs.length ? 3200 : 2400) / speed);
+    });
+  };
+  next();
+}
+
+$("play").onclick = () => { if (timer) { stop(); showUpTo = Infinity; draw(); } else play(0); };
+$("restart").onclick = () => { stop(); showUpTo = Infinity; draw(); };
+$("speed").onclick = () => { speed = speed === 1 ? 2 : speed === 2 ? 4 : 1; $("speed").innerHTML = speed + "&times;"; };
+$("log").onchange = (e) => { useLog = e.target.checked; draw(); };
+$("scrub").oninput = (e) => {
+  stop();
+  const m = DATA.metrics[metric], r = m.records[+e.target.value];
+  if (!r) return;
+  showUpTo = r.ts; draw();
+  banner(r, m, r.previous == null ? r.value : r.previous);
+};
+
+(function init() {
+  const mt = DATA.meta, e = mt.env || {};
+  const st = Object.entries(mt.statuses).map(([k, v]) => `${v} ${k}`).join(", ");
+  $("foot").innerHTML =
+    `Suite: 12 positions, depth ${mt.depth} (and depth ${mt.depth_light} for the light category), fixed-time ${mt.movetime_ms} ms per position for NPS, min of ${mt.passes} passes, one thread.<br>` +
+    `Machine: ${esc(e.cpu || "?")} · governor ${esc(e.governor || "?")} · pinned to cpu ${esc(e.pinned_cpu ?? "?")} · kernel ${esc(e.kernel || "?")}<br>` +
+    `Toolchain: ${esc(mt.image)} · rows: ${mt.commits} commits (${st})<br>` +
+    `Speed and node counts are measured separately on purpose: a smarter search can reach a depth with fewer nodes at the same NPS, and a faster engine can do it at the same node count. ` +
+    `Timings are corrected for machine drift against an anchor binary re-timed every few commits. Generated ${new Date(mt.generated * 1000).toISOString().slice(0, 16).replace("T", " ")} UTC.`;
+  draw();
+})();
+</script>
+</body>
+</html>

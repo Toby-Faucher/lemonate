@@ -8,3 +8,5 @@ plan.md
 /research/experiments/*/*.log
 /research/experiments/*/*.err
 __pycache__/
+/bench/.work/
+/bench/__pycache__/
