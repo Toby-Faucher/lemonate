@@ -375,6 +375,16 @@ impl Board {
         zobrist_castling_hash(bits)
     }
 
+    /// Hashes of the positions that occurred before each move in the game history
+    /// (oldest first), excluding the current position. Empty when history is not
+    /// being tracked. Used to seed repetition detection for a search.
+    pub fn game_history_hashes(&self) -> Vec<u64> {
+        match &self.move_history {
+            Some(history) => history.iter().map(|(_, state)| state.position_hash).collect(),
+            None => Vec::new(),
+        }
+    }
+
     /// Enable move history tracking for make/unmake operations.
     pub fn enable_history(&mut self) {
         if self.move_history.is_none() {

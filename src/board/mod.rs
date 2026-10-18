@@ -98,6 +98,11 @@ impl Board {
         self.castling_rights
     }
 
+    /// Plies since the last capture or pawn move (50-move rule counter).
+    pub fn halfmove_clock(&self) -> u16 {
+        self.halfmove_clock
+    }
+
     pub fn en_passant_square(&self) -> Option<Square> {
         self.en_passant_square
     }

@@ -39,6 +39,12 @@ impl Evaluator {
     }
 
     pub fn evaluate(&self, board: &Board) -> i32 {
+        // Material that cannot force mate is a draw whatever the piece-square tables say.
+        // (Only here, not in static_eval_white_pov, so the tuner's training scores are
+        // untouched.)
+        if board.is_drawn_material() {
+            return 0;
+        }
         let score = self.static_eval_white_pov(board, &EvalWeights::DEFAULT);
 
         // Return score from side-to-move's perspective for negamax
@@ -108,13 +114,12 @@ mod tests {
     use super::*;
     use crate::Board;
 
-    const KNOWN_CASES: [(&str, i32); 5] = [
+    const KNOWN_CASES: [(&str, i32); 4] = [
         ("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", 0),
         (
             "r1bqkbnr/pppppppp/8/8/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 0 1",
             449,
         ),
-        ("8/8/8/8/8/4k3/8/4K3 w - - 0 1", -34),
         ("r3k2r/ppp2ppp/8/8/8/8/PPP2PPP/R3K2R w KQkq - 0 1", 0),
         (
             "r1bqk2r/pp1nbppp/2p2n2/3p4/3P4/2N1PN2/PPP1BPPP/R1BQK2R w KQ - 0 1",
@@ -140,6 +145,39 @@ mod tests {
             let board = Board::from_fen(fen).unwrap();
             let score = evaluator.static_eval_white_pov(&board, &EvalWeights::DEFAULT);
             assert_eq!(score, expected, "white-POV mismatch for {}", fen);
+        }
+    }
+
+    #[test]
+    fn drawn_material_evaluates_to_zero() {
+        let evaluator = Evaluator::new();
+        let drawn = [
+            "8/8/8/4k3/8/8/8/K7 w - - 0 1",         // K v K
+            "8/8/8/4k3/8/8/8/K6B w - - 0 1",        // K+B v K
+            "8/8/8/4k3/8/8/8/K6N b - - 0 1",        // K+N v K
+            "8/8/8/4k3/8/8/8/KNN5 w - - 0 1",       // K+N+N v K
+            "4k3/8/8/8/8/8/8/KB5b w - - 0 1",       // K+B v K+B, bishops on b1 and h1 (both light squares)
+            "4kb2/8/8/8/8/8/8/KB6 w - - 0 1",       // K+B v K+B, opposite colours, no pawns
+        ];
+        for fen in drawn {
+            let board = Board::from_fen(fen).unwrap();
+            assert_eq!(evaluator.evaluate(&board), 0, "should be a draw: {}", fen);
+        }
+    }
+
+    #[test]
+    fn mating_material_is_not_scored_as_a_draw() {
+        let evaluator = Evaluator::new();
+        let winning = [
+            "8/8/8/4k3/8/8/8/K6R w - - 0 1",        // K+R v K
+            "4k3/8/8/8/8/8/P7/K7 w - - 0 1",        // K+P v K
+            "8/8/8/4k3/8/8/8/KBN5 w - - 0 1",       // K+B+N v K
+            "4k3/8/8/8/8/8/8/KN5n w - - 0 1",       // K+N v K+N: mate is possible
+            "4kb2/8/8/8/8/8/P7/KB6 w - - 0 1",      // opposite bishops WITH a pawn
+        ];
+        for fen in winning {
+            let board = Board::from_fen(fen).unwrap();
+            assert_ne!(evaluator.evaluate(&board), 0, "should not be a draw: {}", fen);
         }
     }
 

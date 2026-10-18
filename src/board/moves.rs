@@ -163,26 +163,80 @@ impl Board {
         self.halfmove_clock >= 100
     }
 
+    /// Dead position per FIDE: no sequence of legal moves can produce checkmate.
+    ///
+    /// K v K, K+minor v K, and any number of bishops that all stand on squares of the same
+    /// colour (K+B v K+B with same-coloured bishops included). K+N v K+N, K+N v K+B and
+    /// opposite-coloured bishops are NOT dead: mate is possible, if only by a blunder.
     pub fn is_insufficient_material(&self) -> bool {
+        let (knights, bishops) = match self.minors_only() {
+            Some(m) => m,
+            None => return false,
+        };
+        match (knights.count_pieces(), bishops.count_pieces()) {
+            (0, _) => self.same_colour_squares(bishops),
+            (1, 0) => true,
+            _ => false,
+        }
+    }
+
+    /// Material that cannot force checkmate against correct defence: the dead positions
+    /// above plus K+N+N v K and pawnless opposite-coloured K+B v K+B. The evaluator
+    /// scores these as draws.
+    pub fn is_drawn_material(&self) -> bool {
+        let (knights, bishops) = match self.minors_only() {
+            Some(m) => m,
+            None => return false,
+        };
+        let (n, b) = (knights.count_pieces(), bishops.count_pieces());
+        match (n, b) {
+            (0, _) => {
+                if self.same_colour_squares(bishops) {
+                    return true;
+                }
+                // Opposite-coloured bishops, one each and nothing else.
+                b == 2
+                    && self.piece_bitboard(Color::White, PieceType::Bishop).count_pieces() == 1
+                    && self.piece_bitboard(Color::Black, PieceType::Bishop).count_pieces() == 1
+            }
+            (1, 0) => true,
+            // K+N+N v K: both knights belong to one side.
+            (2, 0) => {
+                self.piece_bitboard(Color::White, PieceType::Knight).count_pieces() != 1
+            }
+            _ => false,
+        }
+    }
+
+    /// (knights, bishops) of both colours if the board holds nothing but kings and minor
+    /// pieces, otherwise None.
+    fn minors_only(&self) -> Option<(crate::Bitboard, crate::Bitboard)> {
+        let mut heavy = crate::Bitboard::EMPTY;
+        let mut knights = crate::Bitboard::EMPTY;
+        let mut bishops = crate::Bitboard::EMPTY;
         for color in [Color::White, Color::Black] {
-            if !self.piece_bitboard(color, PieceType::Pawn).is_empty()
-                || !self.piece_bitboard(color, PieceType::Rook).is_empty()
-                || !self.piece_bitboard(color, PieceType::Queen).is_empty()
-            {
-                return false;
+            heavy = heavy
+                | self.piece_bitboard(color, PieceType::Pawn)
+                | self.piece_bitboard(color, PieceType::Rook)
+                | self.piece_bitboard(color, PieceType::Queen);
+            knights = knights | self.piece_bitboard(color, PieceType::Knight);
+            bishops = bishops | self.piece_bitboard(color, PieceType::Bishop);
+        }
+        if heavy.is_empty() { Some((knights, bishops)) } else { None }
+    }
+
+    /// True if every square in `bb` has the same colour (vacuously true when empty).
+    fn same_colour_squares(&self, bb: crate::Bitboard) -> bool {
+        let mut light = false;
+        let mut dark = false;
+        for sq in bb {
+            if (sq.file() + sq.rank()) % 2 == 1 {
+                light = true;
+            } else {
+                dark = true;
             }
         }
-
-        let white_knights = self.piece_bitboard(Color::White, PieceType::Knight).count();
-        let white_bishops = self.piece_bitboard(Color::White, PieceType::Bishop).count();
-
-        let black_knights = self.piece_bitboard(Color::Black, PieceType::Knight).count();
-        let black_bishops = self.piece_bitboard(Color::Black, PieceType::Bishop).count();
-
-        let white_minors = white_knights + white_bishops;
-        let black_minors = black_knights + black_bishops;
-
-        white_minors <= 1 && black_minors <= 1
+        !(light && dark)
     }
 
     pub fn generate_pseudo_legal_moves(&self) -> Vec<Move> {

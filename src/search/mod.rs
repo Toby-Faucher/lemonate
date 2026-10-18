@@ -218,6 +218,10 @@ pub struct SearchEngine {
     root_moves: Option<Vec<Move>>,
     /// Per-ply reusable move buffers (capacity retained, no per-node alloc).
     move_buffers: Vec<Vec<Move>>,
+    /// Hashes of the positions on the line being searched, preceded by the game history
+    /// back to the last irreversible move. `path_root` is where the search proper starts.
+    path: Vec<u64>,
+    path_root: usize,
 }
 
 impl SearchEngine {
@@ -236,6 +240,8 @@ impl SearchEngine {
             pv_len: [0; PV_SIZE],
             root_moves: None,
             move_buffers: Vec::new(),
+            path: Vec::new(),
+            path_root: 0,
         }
     }
 
@@ -400,6 +406,7 @@ impl SearchEngine {
         let mut result = SearchResult::default();
         let mut board = board.clone();
         board.enable_history();
+        self.seed_path(&board);
 
         let max_depth = max_depth.unwrap_or(MAX_DEPTH).max(1);
         // Helpers with a stagger above the cap still search the cap.
@@ -597,6 +604,28 @@ impl SearchEngine {
         let hash = board.position_hash();
         let is_pv = beta - alpha > 1;
 
+        // Draws by rule. Checked before the TT probe so a stale stored score cannot
+        // hide them. Never at the root: the engine must still pick a move there.
+        if ply > 0 {
+            if self.is_repetition(board, hash) || board.is_insufficient_material() {
+                return 0;
+            }
+            if board.halfmove_clock() >= 100 {
+                // Checkmate on the move that completes the count takes precedence over
+                // the 50-move draw.
+                if self.move_buffers.len() <= ply as usize {
+                    self.move_buffers.resize_with(ply as usize + 1, Vec::new);
+                }
+                let buf = &mut self.move_buffers[ply as usize];
+                board.generate_legal_moves_into(buf);
+                return if buf.is_empty() && board.is_in_check() {
+                    -MATE_SCORE + ply as i32
+                } else {
+                    0
+                };
+            }
+        }
+
         // TT probing - get hash move and potentially cutoff
         let mut hash_move: Option<Move> = None;
         if let Some(entry) = self.tt_probe(hash) {
@@ -753,6 +782,9 @@ impl SearchEngine {
                 0
             };
 
+            // The position we are leaving joins the path for the children's repetition check.
+            self.path.push(hash);
+
             // Search with reduced depth first.
             let mut score = if reduction > 0 {
                 -self.negamax(board, depth - 1 - reduction, -alpha - 1, -alpha, ply + 1)
@@ -766,6 +798,7 @@ impl SearchEngine {
             }
 
             // Unmake the move.
+            self.path.pop();
             board.undo_move(mv, undo);
 
             // Check for time out.
@@ -974,8 +1007,17 @@ impl SearchEngine {
                     PieceType::King => 20000,
                 };
 
+                // A capture-promotion also gains the promoted piece (minus the pawn).
+                let promotion_gain = match mv.move_type {
+                    MoveType::Promotion(PieceType::Queen) => 800,
+                    MoveType::Promotion(PieceType::Rook) => 400,
+                    MoveType::Promotion(PieceType::Bishop) => 230,
+                    MoveType::Promotion(PieceType::Knight) => 220,
+                    _ => 0,
+                };
+
                 // If even capturing the piece can't improve alpha, skip.
-                if stand_pat + captured_value + 200 < alpha {
+                if stand_pat + captured_value + promotion_gain + 200 < alpha {
                     continue;
                 }
 
@@ -1015,8 +1057,11 @@ impl SearchEngine {
         beta: i32,
         ply: u8,
     ) -> Option<i32> {
-        // Make null move (just switch side to move).
+        // Make null move (just switch side to move). The position we leave joins the
+        // path so child distances stay aligned with real plies.
+        let leaving = board.position_hash();
         board.make_null_move();
+        self.path.push(leaving);
 
         // Search with reduced depth.
         let reduction = NULL_MOVE_REDUCTION + depth / 6;
@@ -1029,6 +1074,7 @@ impl SearchEngine {
         );
 
         // Unmake null move.
+        self.path.pop();
         board.unmake_null_move();
 
         // If null move search still beats beta, we can prune.
@@ -1148,6 +1194,42 @@ impl SearchEngine {
         }
 
         pv
+    }
+
+    /// Seed the repetition path with the game history since the last irreversible move.
+    fn seed_path(&mut self, board: &Board) {
+        let history = board.game_history_hashes();
+        let reach = (board.halfmove_clock() as usize).min(history.len());
+        self.path.clear();
+        self.path.extend_from_slice(&history[history.len() - reach..]);
+        self.path_root = self.path.len();
+    }
+
+    /// True if the current position repeats an earlier one on the path.
+    ///
+    /// A single repetition inside the search tree counts as a draw (the side that repeated
+    /// could repeat again). A repetition of a position from the played game needs two
+    /// earlier occurrences, i.e. a genuine threefold.
+    fn is_repetition(&self, board: &Board, hash: u64) -> bool {
+        let n = self.path.len();
+        let reach = (board.halfmove_clock() as usize).min(n);
+        let mut history_hits = 0;
+        // Only positions with the same side to move can repeat: every second ply.
+        let mut dist = 2;
+        while dist <= reach {
+            let idx = n - dist;
+            if self.path[idx] == hash {
+                if idx >= self.path_root {
+                    return true;
+                }
+                history_hits += 1;
+                if history_hits >= 2 {
+                    return true;
+                }
+            }
+            dist += 2;
+        }
+        false
     }
 
     /// First move of the current principal variation, if any.
@@ -1521,5 +1603,131 @@ mod tests {
                 assert!(b.make_move(*mv));
             }
         }
+    }
+
+    fn best(fen: &str, depth: u8) -> SearchResult {
+        let board = Board::from_fen(fen).unwrap();
+        SearchEngine::new().search(&board, SearchLimits::depth(depth))
+    }
+
+    #[test]
+    fn dead_drawn_endings_score_zero() {
+        for fen in [
+            "8/8/8/4k3/8/8/8/K6B w - - 0 1",
+            "8/8/8/4k3/8/8/8/KNN5 w - - 0 1",
+            "4k3/8/8/8/8/8/8/KB5b w - - 0 1",
+        ] {
+            let r = best(fen, 6);
+            assert_eq!(r.score, 0, "{} searched as {}", fen, r.score);
+            assert!(r.best_move.is_some(), "a drawn position still needs a move: {}", fen);
+        }
+    }
+
+    #[test]
+    fn fifty_move_rule_scores_a_draw() {
+        // White is a rook up but the clock is at 99: any quiet move reaches 100 and the
+        // game is drawn, so only an immediate capture/pawn move keeps the win alive.
+        // With nothing to capture the best achievable score collapses to a draw.
+        let drawn = best("8/8/8/4k3/8/8/8/K6R w - - 99 80", 4);
+        let fresh = best("8/8/8/4k3/8/8/8/K6R w - - 0 80", 4);
+        assert!(fresh.score > 300, "rook up should be winning, got {}", fresh.score);
+        assert!(drawn.score.abs() < 50, "clock at 99 should be ~drawn, got {}", drawn.score);
+    }
+
+    #[test]
+    fn checkmate_beats_the_fifty_move_draw() {
+        // Qg7# delivers mate on the 100th half-move; that is mate, not a draw.
+        let r = best("7k/8/6K1/8/8/8/6Q1/8 w - - 99 80", 3);
+        assert!(is_mate_score(r.score), "expected a mate score, got {}", r.score);
+    }
+
+    /// Play a list of UCI moves from the start position with history enabled.
+    fn play(moves: &[&str]) -> Board {
+        let mut board = Board::starting_position();
+        board.enable_history();
+        for m in moves {
+            let mv = find_move(&board, m);
+            assert!(board.make_move(mv), "illegal test move {}", m);
+        }
+        board
+    }
+
+    fn find_move(board: &Board, uci: &str) -> Move {
+        let sq = |s: crate::Square| format!("{}{}", (b'a' + s.file()) as char, s.rank() + 1);
+        board
+            .generate_legal_moves()
+            .into_iter()
+            .find(|m| format!("{}{}", sq(m.from), sq(m.to)) == uci)
+            .unwrap_or_else(|| panic!("no legal move {}", uci))
+    }
+
+    /// Would the position reached by `reply` from `root` be flagged as a repetition by an
+    /// engine searching from `root`?
+    fn repeats_after(root: &Board, reply: &str) -> bool {
+        let mut engine = SearchEngine::new();
+        engine.seed_path(root);
+        engine.path.push(root.position_hash()); // the root loop pushes the position it leaves
+        let mut child = root.clone();
+        let mv = find_move(&child, reply);
+        assert!(child.make_move(mv));
+        engine.is_repetition(&child, child.position_hash())
+    }
+
+    #[test]
+    fn third_occurrence_from_game_history_is_a_draw() {
+        // After 1.Nf3 Nf6 2.Ng1 Ng8 3.Nf3 Nf6 4.Ng1 the start position has occurred twice
+        // (plies 0 and 4). ...Ng8 would be its third occurrence.
+        let root = play(&["g1f3", "g8f6", "f3g1", "f6g8", "g1f3", "g8f6", "f3g1"]);
+        assert!(repeats_after(&root, "f6g8"));
+    }
+
+    #[test]
+    fn second_occurrence_from_game_history_is_not_a_draw() {
+        // After 1.Nf3 Nf6 2.Ng1, ...Ng8 reaches the start position for only the second time.
+        let root = play(&["g1f3", "g8f6", "f3g1"]);
+        assert!(!repeats_after(&root, "f6g8"));
+    }
+
+    #[test]
+    fn pawn_move_resets_repetition_scope() {
+        // The pawn push is irreversible, so earlier positions can never recur.
+        let root = play(&["g1f3", "g8f6", "f3g1", "f6g8", "e2e4", "e7e5", "f1c4", "f8c5"]);
+        assert!(!repeats_after(&root, "c4f1"));
+    }
+
+    #[test]
+    fn single_repetition_inside_the_tree_is_a_draw() {
+        let mut board = Board::starting_position();
+        let mut engine = SearchEngine::new();
+        engine.seed_path(&board);
+        // Walk 1.Nf3 Nf6 2.Ng1 Ng8 the way the search does: push the position being left.
+        for m in ["g1f3", "g8f6", "f3g1"] {
+            engine.path.push(board.position_hash());
+            let mv = find_move(&board, m);
+            assert!(board.make_move(mv));
+            assert!(!engine.is_repetition(&board, board.position_hash()), "after {m}");
+        }
+        engine.path.push(board.position_hash());
+        let mv = find_move(&board, "f6g8");
+        assert!(board.make_move(mv));
+        assert!(engine.is_repetition(&board, board.position_hash()));
+    }
+
+    #[test]
+    fn search_steers_into_a_threefold_repetition_when_losing() {
+        // White (rook) is lost against a queen. The position after Rh2 has already occurred
+        // twice, so Rh2 is a draw by repetition and must beat every losing alternative.
+        let fen = "6k1/8/8/8/8/1q6/8/K6R w - - 0 1";
+        let mut board = Board::from_fen(fen).unwrap();
+        board.enable_history();
+        for m in ["h1h2", "b3b4", "h2h1", "b4b3", "h1h2", "b3b4", "h2h1", "b4b3"] {
+            let mv = find_move(&board, m);
+            assert!(board.make_move(mv));
+        }
+        // Root = initial position for the third time; Rh2 would be the third Rh2 position.
+        let r = SearchEngine::new().search(&board, SearchLimits::depth(5));
+        assert_eq!(r.score, 0, "should take the draw, got {}", r.score);
+        let mv = r.best_move.unwrap();
+        assert_eq!((mv.from.file(), mv.from.rank(), mv.to.file(), mv.to.rank()), (7, 0, 7, 1));
     }
 }
