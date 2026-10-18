@@ -1,0 +1,13 @@
+{
+  "image": "docker.io/library/rust:1.98.1-slim",
+  "rustflags": "-C target-cpu=native -C target-feature=+bmi2,+popcnt",
+  "depth": 12,
+  "depth_light": 7,
+  "movetime_ms": 400,
+  "passes": 5,
+  "nps_passes": 3,
+  "cap_s": 40,
+  "measure_cpu": 14,
+  "build_cpus": [0, 2, 4, 6, 8, 10],
+  "branch": "main"
+}
