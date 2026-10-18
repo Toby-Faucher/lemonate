@@ -557,6 +557,13 @@ impl SearchEngine {
         // Save original alpha for TT entry type determination.
         let original_alpha = alpha;
 
+        // This node starts with an empty PV. Without the reset a node that returns early
+        // (leaf, cutoff, draw) or fails low keeps the PV length left by an earlier sibling,
+        // and its parent would copy that stale tail into the reported line.
+        if (ply as usize) < PV_SIZE {
+            self.pv_len[ply as usize] = 0;
+        }
+
         // Update selective depth.
         if ply > self.stats.seldepth {
             self.stats.seldepth = ply;
@@ -1487,4 +1494,32 @@ mod tests {
         eprintln!("Best move at depth 10: {}{}, score: {}", from_str, to_str, result.score);
     }
 
+
+    #[test]
+    fn reported_pv_is_a_legal_line_from_the_root() {
+        let fens = [
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            "r1bq1rk1/pp1pppbp/2n2np1/2p5/2P5/2N2NP1/PP1PPPBP/R1BQ1RK1 w - - 0 1",
+            "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
+            "r2q1rk1/ppp2ppp/2np1n2/2b1p1B1/2B1P1b1/2NP1N2/PPP2PPP/R2Q1RK1 w - - 0 1",
+            // Found by checking 400 real positions: the last PV move was stale at depth 8.
+            "r4b1r/p1k1pppB/bqp2n2/P7/3p4/7P/1PPP1PP1/RNBQ1K1R w - - 1 14",
+            "rn1k1b1r/pp2pP1p/6p1/2p1nb2/5B2/2N5/PPP2PPP/1R2KBNR b K - 3 10",
+            "rnb2rk1/ppq3b1/4pppp/2ppPn1P/2BP1B2/2N5/PPPN1PP1/R2QK2R b KQ - 1 12",
+        ];
+        for fen in fens {
+            let board = Board::from_fen(fen).unwrap();
+            let r = SearchEngine::new().search(&board, SearchLimits::depth(8));
+            let mut b = board.clone();
+            for mv in &r.pv {
+                assert!(
+                    b.generate_legal_moves().contains(mv),
+                    "illegal PV move {:?} in {}: pv = {:?}",
+                    mv, fen, r.pv
+                );
+                assert!(b.make_move(*mv));
+            }
+        }
+    }
 }
