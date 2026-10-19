@@ -15,7 +15,10 @@
 use super::{SearchEngine, SearchLimits, SearchResult, SharedTT};
 use crate::Board;
 
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 /// Maximum worker threads (matches the UCI `Threads` option ceiling).
 pub const MAX_THREADS: usize = 256;
@@ -62,11 +65,16 @@ pub fn parallel_search(
 
     shared.new_search();
 
+    // Worker 0 follows the soft/hard time limits; helpers only watch the hard limit, so
+    // worker 0 raises this flag on exit to stop them promptly.
+    let helper_stop = Arc::new(AtomicBool::new(false));
+
     let mut main_engine = Some(main_engine);
     let mut handles = Vec::with_capacity(num_threads);
     for thread_id in 0..num_threads {
         let board = board.clone();
         let mut limits = limits.clone();
+        limits.helper_stop = Some(Arc::clone(&helper_stop));
         // Only worker 0 reports iterations; helpers search at staggered depths and would
         // interleave misleading lines.
         if thread_id != 0 {
@@ -79,6 +87,7 @@ pub fn parallel_search(
 
         if thread_id == 0 {
             let mut engine = main_engine.take().unwrap_or_default();
+            let stop_helpers = limits.helper_stop.clone();
             handles.push(
                 std::thread::Builder::new()
                     .name("lemonate-smp-0".to_string())
@@ -87,6 +96,9 @@ pub fn parallel_search(
                         engine.set_shared_tt(Some(shared));
                         let result = engine.search_worker(&board, limits, start_depth);
                         engine.set_shared_tt(None);
+                        if let Some(stop) = &stop_helpers {
+                            stop.store(true, Ordering::Relaxed);
+                        }
                         (0usize, engine, result)
                     })
                     .expect("failed to spawn SMP worker"),

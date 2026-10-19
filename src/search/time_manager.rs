@@ -92,6 +92,9 @@ pub struct SearchLimits {
     pub overhead_ms: u64,
     /// Called after every completed iteration, for streaming `info` lines (optional).
     pub info_sink: Option<InfoSink>,
+    /// Lazy SMP only: set by worker 0 when it finishes so helper threads stop at once
+    /// instead of running on to their own hard limit (optional).
+    pub helper_stop: Option<Arc<AtomicBool>>,
 }
 
 impl SearchLimits {
@@ -105,6 +108,7 @@ impl SearchLimits {
             stop_signal: None,
             overhead_ms: 0,
             info_sink: None,
+            helper_stop: None,
         }
     }
 
@@ -118,6 +122,7 @@ impl SearchLimits {
             stop_signal: None,
             overhead_ms: 0,
             info_sink: None,
+            helper_stop: None,
         }
     }
 
@@ -131,6 +136,7 @@ impl SearchLimits {
             stop_signal: None,
             overhead_ms: 0,
             info_sink: None,
+            helper_stop: None,
         }
     }
 
@@ -148,6 +154,7 @@ impl SearchLimits {
             stop_signal: None,
             overhead_ms: 0,
             info_sink: None,
+            helper_stop: None,
         }
     }
 
@@ -216,6 +223,8 @@ pub struct TimeManager {
     use_time_limit: bool,
     /// Shared stop flag set by another thread (UCI `stop`).
     stop_signal: Option<Arc<AtomicBool>>,
+    /// Lazy SMP: set when worker 0 is done (see `SearchLimits::helper_stop`).
+    helper_stop: Option<Arc<AtomicBool>>,
 }
 
 impl TimeManager {
@@ -262,6 +271,7 @@ impl TimeManager {
             node_limit: limits.max_nodes,
             use_time_limit,
             stop_signal: limits.stop_signal.clone(),
+            helper_stop: limits.helper_stop.clone(),
         }
     }
 
@@ -284,6 +294,12 @@ impl TimeManager {
 
         // Check shared stop signal from another thread.
         if let Some(signal) = &self.stop_signal {
+            if signal.load(Ordering::Relaxed) {
+                return true;
+            }
+        }
+
+        if let Some(signal) = &self.helper_stop {
             if signal.load(Ordering::Relaxed) {
                 return true;
             }
@@ -326,6 +342,12 @@ impl TimeManager {
         }
 
         if let Some(signal) = &self.stop_signal {
+            if signal.load(Ordering::Relaxed) {
+                return false;
+            }
+        }
+
+        if let Some(signal) = &self.helper_stop {
             if signal.load(Ordering::Relaxed) {
                 return false;
             }
@@ -495,6 +517,7 @@ impl Default for TimeManager {
             node_limit: None,
             use_time_limit: false,
             stop_signal: None,
+            helper_stop: None,
         }
     }
 }
