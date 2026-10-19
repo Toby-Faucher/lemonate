@@ -94,6 +94,9 @@ pub const REVERSE_FUTILITY_MARGIN: i32 = 100;
 /// Maximum depth at which reverse futility pruning applies.
 pub const REVERSE_FUTILITY_MAX_DEPTH: i32 = 6;
 
+/// Marks a ply whose static eval is unusable (side to move in check).
+const NO_EVAL: i32 = i32::MIN;
+
 /// Aspiration window initial size.
 pub const ASPIRATION_WINDOW: i32 = 50;
 
@@ -226,6 +229,9 @@ pub struct SearchEngine {
     path_root: usize,
     /// Where completed iterations are reported (UCI `info` stream), if anywhere.
     info_sink: Option<InfoSink>,
+    /// Static eval at each ply of the line being searched (`NO_EVAL` when in check), used to
+    /// tell whether the side to move is improving on its position two plies ago.
+    eval_stack: [i32; PV_SIZE + 2],
 }
 
 impl SearchEngine {
@@ -247,6 +253,7 @@ impl SearchEngine {
             path: Vec::new(),
             path_root: 0,
             info_sink: None,
+            eval_stack: [NO_EVAL; PV_SIZE + 2],
         }
     }
 
@@ -701,6 +708,15 @@ impl SearchEngine {
         let static_eval = self.evaluator.evaluate(board);
         let in_check = board.is_in_check();
 
+        // Improving: the static eval is higher than it was two plies ago, so this side is
+        // doing better than the line suggested. Pruning can be a little bolder when it is
+        // not, and a little more careful when it is.
+        self.eval_stack[ply as usize] = if in_check { NO_EVAL } else { static_eval };
+        let improving = ply >= 2
+            && !in_check
+            && self.eval_stack[ply as usize - 2] != NO_EVAL
+            && static_eval > self.eval_stack[ply as usize - 2];
+
         // Reverse futility pruning: static eval far above beta at shallow depth.
         if !is_pv
             && !in_check
@@ -709,7 +725,8 @@ impl SearchEngine {
             && beta.abs() < MATE_SCORE - MAX_DEPTH as i32
             && self.can_null_move(board, ply)
         {
-            let margin = REVERSE_FUTILITY_MARGIN * depth;
+            let margin = REVERSE_FUTILITY_MARGIN * depth
+                - if improving { REVERSE_FUTILITY_MARGIN / 2 } else { 0 };
             if static_eval - margin >= beta {
                 return static_eval - margin;
             }
@@ -812,7 +829,7 @@ impl SearchEngine {
                 && !in_check
                 && !board.is_in_check() // Don't reduce moves that give check
             {
-                self.late_move_reduction(depth, move_count, &mv)
+                self.late_move_reduction(depth, move_count, &mv) + i32::from(!improving)
             } else {
                 0
             };
