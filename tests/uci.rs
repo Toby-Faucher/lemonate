@@ -399,3 +399,46 @@ fn a_line_that_is_not_utf8_does_not_end_the_engine() {
     assert!(out.contains("readyok"), "engine quit early:\n{out}");
     assert!(out.lines().any(|l| l.starts_with("bestmove ")), "no bestmove in:\n{out}");
 }
+
+// ---- Lazy SMP lifecycle ----
+
+/// Node count from the last `info ... nodes N` line.
+fn last_nodes(lines: &[String]) -> u64 {
+    lines
+        .iter()
+        .rev()
+        .find(|l| l.starts_with("info") && l.contains(" nodes "))
+        .and_then(|l| l.split(" nodes ").nth(1))
+        .and_then(|r| r.split_whitespace().next())
+        .and_then(|n| n.parse().ok())
+        .expect("an info line with nodes")
+}
+
+#[test]
+fn smp_node_limit_bounds_the_whole_search() {
+    // The reported count is non-quiescence nodes only, so compare against the
+    // single-thread run of the same limit: per-worker counting gave ~2.8x it.
+    let go = |threads: u32| {
+        let script = format!(
+            "setoption name Threads value {threads}\nposition startpos\ngo nodes 100000\n"
+        );
+        let out = run(&script, 1);
+        assert_ne!(bestmove(&out).expect("bestmove"), "0000");
+        last_nodes(&out)
+    };
+    let single = go(1);
+    let smp = go(4);
+    assert!(smp > 0 && smp * 2 < single * 3, "Threads 4 reported {smp}, Threads 1 {single}");
+}
+
+#[test]
+fn smp_movetime_returns_promptly() {
+    let start = Instant::now();
+    let out = run(
+        "setoption name Threads value 4\nposition startpos\ngo movetime 300\n",
+        1,
+    );
+    let took = start.elapsed();
+    assert_ne!(bestmove(&out).expect("bestmove"), "0000");
+    assert!(took < Duration::from_millis(1000), "took {took:?}");
+}
