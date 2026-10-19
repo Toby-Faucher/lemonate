@@ -237,6 +237,23 @@ impl TranspositionTable {
         }
     }
 
+    /// Store a quiescence result (depth 0) without evicting search results.
+    ///
+    /// Quiescence nodes vastly outnumber interior nodes. With the table's "always replace on a
+    /// collision" rule they would wipe out the deeper entries the main search relies on, so a
+    /// quiescence entry only takes a slot that is empty, stale, or itself depth 0.
+    pub fn store_qs(&mut self, hash: u64, score: i32, entry_type: EntryType) {
+        let index = self.index(hash);
+        let existing = &self.entries[index];
+        let should_replace =
+            existing.is_empty() || existing.age != self.current_age || existing.depth == 0;
+        if should_replace {
+            let best_move = if existing.hash == hash { existing.best_move } else { None };
+            self.entries[index] =
+                TranspositionEntry::new(hash, score, 0, entry_type, best_move, self.current_age);
+        }
+    }
+
     /// Adjust mate scores for storage.
     ///
     /// Mate scores are stored as "mate in N plies from this position"
@@ -543,6 +560,27 @@ impl SharedTT {
         }
     }
 
+    /// Quiescence counterpart of [`TranspositionTable::store_qs`].
+    pub fn store_qs(&self, hash: u64, score: i32, entry_type: EntryType) {
+        let index = self.index(hash);
+        let slot = &self.entries[index];
+        let current_age = self.age.load(Ordering::Acquire);
+
+        let locked = slot.lock();
+        // SAFETY: slot locked for writing.
+        let existing: TranspositionEntry = unsafe { std::ptr::read_volatile(slot.data.get()) };
+        let should_replace =
+            existing.is_empty() || existing.age != current_age || existing.depth == 0;
+        if should_replace {
+            let best_move = if existing.hash == hash { existing.best_move } else { None };
+            let entry = TranspositionEntry::new(hash, score, 0, entry_type, best_move, current_age);
+            // SAFETY: slot locked for writing.
+            unsafe { slot.publish(locked, entry) };
+        } else {
+            slot.unlock(locked);
+        }
+    }
+
     /// Get the hash table usage permille (0-1000), sampling the first
     /// 1000 entries like [`TranspositionTable::hashfull`].
     pub fn hashfull(&self) -> u16 {
@@ -704,6 +742,50 @@ mod tests {
         let entry = tt.probe(hash1).unwrap();
         assert_eq!(entry.hash, hash1);
         assert_eq!(entry.score, 100);
+    }
+
+    #[test]
+    fn test_store_qs_does_not_evict_deeper_entries() {
+        let mut tt = TranspositionTable::new(1);
+        let deep: u64 = 0x1234_5678_9ABC_DEF0;
+        // Same slot (the mask only looks at the low bits), different position.
+        let other: u64 = deep ^ ((tt.len() as u64) << 8);
+        assert_eq!(tt.index(deep), tt.index(other));
+
+        tt.store(deep, 100, 6, EntryType::Exact, None);
+        tt.store_qs(other, 7, EntryType::Exact);
+        let kept = tt.probe(deep).expect("deep entry must survive a quiescence store");
+        assert_eq!((kept.score, kept.depth), (100, 6));
+        assert!(tt.probe(other).is_none());
+    }
+
+    #[test]
+    fn test_store_qs_replaces_empty_stale_and_shallow_slots() {
+        let mut tt = TranspositionTable::new(1);
+        let a: u64 = 0x1234_5678_9ABC_DEF0;
+        let b: u64 = a ^ ((tt.len() as u64) << 8);
+
+        tt.store_qs(a, 5, EntryType::Exact); // empty slot
+        assert_eq!(tt.probe(a).unwrap().depth, 0);
+        tt.store_qs(b, 9, EntryType::UpperBound); // slot holds a depth-0 entry
+        assert_eq!(tt.probe(b).unwrap().score, 9);
+
+        tt.store(a, 100, 6, EntryType::Exact, None); // deep entry, then a new search starts
+        tt.new_search();
+        tt.store_qs(b, 11, EntryType::Exact); // stale entries may be taken over
+        assert_eq!(tt.probe(b).unwrap().score, 11);
+    }
+
+    #[test]
+    fn test_store_qs_keeps_the_existing_best_move_for_the_same_position() {
+        let mut tt = TranspositionTable::new(1);
+        let h: u64 = 0xABCD_EF01_2345_6789;
+        let mv = make_test_move();
+        tt.store(h, 40, 0, EntryType::Exact, Some(mv));
+        tt.store_qs(h, 55, EntryType::Exact);
+        let e = tt.probe(h).unwrap();
+        assert_eq!(e.score, 55);
+        assert_eq!(e.best_move, Some(mv));
     }
 
     #[test]
