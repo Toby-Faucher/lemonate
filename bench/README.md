@@ -44,6 +44,29 @@ Remote matches queue on the same lock the gate uses. `record` leaves `hypothesis
 hand; then `research/scripts/catalog.sh` regenerates `CATALOG.md`. Unlike `gate.sh`, this does not
 check the diff against the protected paths or run the local test stages, so run the tests yourself.
 
+## Absolute strength: Elo against Stockfish
+
+An SPRT says one version beats another; it never says how strong either is. `bench/elo.py` rates
+versions on a fixed scale by playing each against Stockfish 15.1 limited to four `UCI_Elo` levels
+(1500, 1800, 2100, 2400; 100 games each, 10+0.1, the research book):
+
+```bash
+bench/elo.py start            # the speed record holders plus main and the PVS branch (or pass revisions)
+bench/elo.py status           # games played and a provisional rating per version
+bench/elo.py collect          # write finished versions to bench/elo.jsonl
+bench/bench.py report         # the report gets an "Elo vs Stockfish" tab with its own record line
+```
+
+A version's rating R solves `sum n * E(R - anchor) = sum score` over its games, and the error shown
+is the 95% interval from the games' own variance. A version that loses or wins every game lies
+outside the anchors and is not recorded. Jobs alternate between the two machines and queue on the
+same locks as the SPRT matches.
+
+The scale is Stockfish 15.1's `UCI_Elo` (range 1350-2850), the same one the earlier calibration on
+`chess-test` used. It is not CCRL or FIDE, so read the numbers against each other, not as an official
+rating. A new Elo record must beat the standing one by 30 points: one measurement is good to about
++/-50.
+
 ## What is measured
 
 | Metric | How | Why |

@@ -39,6 +39,7 @@ WORK = BENCH / ".work"
 HISTORY = BENCH / "history.jsonl"
 ANCHOR = BENCH / "anchor.json"
 SUITE = BENCH / "suite.epd"
+ELO_FILE = BENCH / "elo.jsonl"
 CONFIG = json.loads((BENCH / "config.json").read_text())
 
 # Bump when a harness change makes older rows untrustworthy.
@@ -54,6 +55,9 @@ UCI_MAIN = "use lemonate::uci::UciEngine;\n\nfn main() {\n    let mut engine = U
 # percent. Timings repeat to within ~1%, so smaller "wins" are noise. Node counts are
 # deterministic, so any reduction is real.
 RECORD_MIN_PCT = {"ttd_ms": 1.5, "ttd_light_ms": 3.0, "nps": 1.5, "nodes": 0.0}
+# Elo is a difference, not a ratio: a version must beat the standing record by this many points.
+# A measurement is good to about +/-50 at 400 games, so smaller steps are not distinguishable.
+RECORD_MIN_ABS = {"elo": 30.0}
 
 # Metric name -> (label, unit, lower_is_better)
 METRICS = {
@@ -61,6 +65,7 @@ METRICS = {
     "ttd_light_ms": ("Time to depth 7", "ms", True),
     "nps": ("Nodes per second", "nps", False),
     "nodes": ("Nodes to depth", "nodes", True),
+    "elo": ("Elo vs Stockfish", "Elo", False),
 }
 
 
@@ -679,9 +684,12 @@ def records(pts, lower_is_better, metric=None):
     metric's noise floor (RECORD_MIN_PCT)."""
     out, best, prev_ts = [], None, None
     margin = RECORD_MIN_PCT.get(metric, 0.0) / 100.0
+    step = RECORD_MIN_ABS.get(metric, 0.0)
     for p in pts:
         if best is None:
             better = True
+        elif step:
+            better = p["value"] < best - step if lower_is_better else p["value"] > best + step
         elif lower_is_better:
             better = p["value"] < best * (1 - margin) if margin else p["value"] < best
         else:
@@ -690,6 +698,7 @@ def records(pts, lower_is_better, metric=None):
             rec = dict(p)
             rec["previous"] = best
             rec["improvement_pct"] = None if best is None else abs(p["value"] / best - 1) * 100
+            rec["improvement_abs"] = None if best is None else abs(p["value"] - best)
             if out:
                 out[-1]["held_days"] = round((p["ts"] - out[-1]["ts"]) / 86400, 1)
             out.append(rec)
@@ -700,14 +709,25 @@ def records(pts, lower_is_better, metric=None):
     return out
 
 
+def read_elo_rows():
+    if not ELO_FILE.exists():
+        return []
+    return [{**json.loads(l), "status": "ok"} for l in ELO_FILE.read_text().splitlines() if l.strip()]
+
+
 def cmd_list(args):
-    rows = read_history()
+    rows = read_history() + read_elo_rows()
     for metric, (label, unit, lower) in METRICS.items():
         recs = records(points(rows, metric), lower, metric)
         print(f"\n== {label} ({'lower' if lower else 'higher'} is better) ==")
         for r in recs:
             d = time.strftime("%Y-%m-%d", time.gmtime(r["ts"]))
-            imp = "" if r["improvement_pct"] is None else f"  -{r['improvement_pct']:.1f}%" if lower else f"  +{r['improvement_pct']:.1f}%"
+            if r["improvement_pct"] is None:
+                imp = ""
+            elif unit == "Elo":
+                imp = f"  +{r['improvement_abs']:.0f}"
+            else:
+                imp = f"  -{r['improvement_pct']:.1f}%" if lower else f"  +{r['improvement_pct']:.1f}%"
             print(f"  {d}  {r['short']}  {r['value']:>12,.0f} {unit}{imp:>9}  held {r.get('held_days', 0):>6} d  {r['subject'][:60]}")
 
 
@@ -748,7 +768,15 @@ def cmd_report(args):
 
     rows = read_history()
     out = Path(args.output)
-    rpt.write(rows, out, METRICS, points, records, anchor_load(), CONFIG, fragment=args.fragment)
+    # Elo ratings come from elo.py, one row per rated version; they join the speed rows as extra points.
+    elo_rows = []
+    if ELO_FILE.exists():
+        for line in ELO_FILE.read_text().splitlines():
+            if line.strip():
+                r = json.loads(line)
+                elo_rows.append({**r, "status": "ok"})
+    rpt.write(rows, out, METRICS, points, records, anchor_load(), CONFIG, fragment=args.fragment,
+              extra_rows=elo_rows)
     print(f"wrote {out}")
 
 

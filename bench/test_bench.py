@@ -4,6 +4,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import bench  # noqa: E402
+import elo  # noqa: E402
 
 
 def pts(*vals):
@@ -81,6 +82,52 @@ class Stats(unittest.TestCase):
         self.assertLess(lo, 2.0)
         self.assertGreater(hi, 1.9)
         self.assertGreater(lo, 1.0)
+
+
+class EloFit(unittest.TestCase):
+    def test_half_the_points_rates_at_the_anchor(self):
+        rating, err, games = elo.fit_rating({2000: (40, 40, 20)})
+        self.assertAlmostEqual(rating, 2000, places=1)
+        self.assertEqual(games, 100)
+        self.assertGreater(err, 0)
+
+    def test_three_quarters_of_the_points_is_400_log10_3_above(self):
+        rating, _, _ = elo.fit_rating({2000: (60, 10, 30)})
+        self.assertAlmostEqual(rating, 2000 + 400 * 1.0 * __import__("math").log10(3), places=1)
+
+    def test_recovers_a_known_rating_from_two_anchors(self):
+        results = {}
+        for anchor in (1800, 2100):
+            wins = round(elo.expected(1900 - anchor) * 100000)
+            results[anchor] = (wins, 100000 - wins, 0)
+        self.assertAlmostEqual(elo.fit_rating(results)[0], 1900, delta=1)
+
+    def test_more_games_shrink_the_error(self):
+        small = elo.fit_rating({2000: (20, 20, 10)})[1]
+        large = elo.fit_rating({2000: (200, 200, 100)})[1]
+        self.assertLess(large, small)
+
+    def test_a_clean_sweep_is_flagged_as_outside_the_anchors(self):
+        self.assertTrue(elo.saturated(elo.fit_rating({1500: (0, 100, 0)})[0]))
+        self.assertTrue(elo.saturated(elo.fit_rating({1500: (100, 0, 0)})[0]))
+        self.assertFalse(elo.saturated(elo.fit_rating({1500: (60, 20, 20)})[0]))
+
+    def test_no_games_gives_no_rating(self):
+        self.assertIsNone(elo.fit_rating({}))
+
+    def test_log_parsing_counts_games_from_either_colour(self):
+        log = (
+            "Finished game 1 (v vs sf1500): 1-0 {White wins by adjudication}\n"
+            "Finished game 2 (sf1500 vs v): 0-1 {Black wins by adjudication}\n"   # v wins both
+            "Finished game 3 (v vs sf1800): 1/2-1/2 {Draw by 3-fold repetition}\n"
+            "Finished game 4 (sf1800 vs v): 1-0 {White wins by adjudication}\n"   # v loses
+            "Finished game 5 (sf2100 vs v): 1/2-1/2 {Draw by adjudication}\n"
+            "Rank Name Elo +/- Games Score Draw\nnoise\n"
+        )
+        self.assertEqual(elo.parse_log(log), {1500: (2, 0, 0), 1800: (0, 1, 1), 2100: (0, 0, 1)})
+
+    def test_games_between_two_anchors_are_ignored(self):
+        self.assertEqual(elo.parse_log("Finished game 1 (sf1500 vs sf1800): 1-0 {x}\n"), {})
 
 
 if __name__ == "__main__":
