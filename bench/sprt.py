@@ -222,9 +222,10 @@ def parse(log, meta):
     if scores:
         out["w"], out["l"], out["d"] = map(int, scores[-1])
         out["games"] = sum(map(int, scores[-1]))
-    m = re.search(r"Elo difference: ([-\d.]+) \+/- ([-\d.]+)", log)
-    if m:
-        out["elo"], out["err"] = float(m.group(1)), float(m.group(2))
+    # cutechess repeats this line as the match goes on: the last one is the current estimate.
+    elos = re.findall(r"Elo difference: ([-\d.]+) \+/- ([-\d.]+)", log)
+    if elos:
+        out["elo"], out["err"] = float(elos[-1][0]), float(elos[-1][1])
     m = re.search(r"SPRT: llr ([-\d.]+).*?(H[01]) was accepted", log)
     if m:
         out["llr"], out["verdict"] = float(m.group(1)), m.group(2)

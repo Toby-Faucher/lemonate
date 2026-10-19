@@ -346,3 +346,32 @@ fn the_new_options_are_advertised() {
     assert!(out.iter().any(|l| l == "option name Move Overhead type spin default 10 min 0 max 5000"), "{out:?}");
     assert!(out.iter().any(|l| l == "option name Clear Hash type button"), "{out:?}");
 }
+
+/// Run the engine on `script` (raw bytes) and close stdin straight away, like a piped script.
+fn run_piped(script: &[u8]) -> String {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_lemonate"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn engine");
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(script).unwrap();
+    drop(stdin);
+    let out = child.wait_with_output().expect("engine output");
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+#[test]
+fn a_piped_search_still_reports_its_bestmove_at_eof() {
+    let out = run_piped(b"position startpos\ngo depth 6\n");
+    assert!(out.lines().any(|l| l.starts_with("bestmove ")), "no bestmove in:\n{out}");
+}
+
+#[test]
+fn a_line_that_is_not_utf8_does_not_end_the_engine() {
+    // 0xE9 is Latin-1 'e-acute' and not valid UTF-8 on its own.
+    let out = run_piped(b"setoption name BookFile value /tmp/caf\xe9.bin\nisready\nposition startpos\ngo depth 4\n");
+    assert!(out.contains("readyok"), "engine quit early:\n{out}");
+    assert!(out.lines().any(|l| l.starts_with("bestmove ")), "no bestmove in:\n{out}");
+}

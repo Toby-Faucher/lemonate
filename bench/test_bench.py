@@ -44,6 +44,19 @@ class Records(unittest.TestCase):
         self.assertEqual([r["value"] for r in recs], [100, 97])
         self.assertAlmostEqual(recs[1]["improvement_pct"], 3.0)
 
+    def test_drift_correction_moves_timings_towards_the_calibration_machine(self):
+        # Machine 10% slower than at calibration (drift 0.9): the raw time is too long, so the
+        # corrected time is shorter and the corrected nps higher.
+        slow = {"ttd_ms": 1000.0, "ttd_light_ms": 100.0, "nps": 900_000}
+        bench.normalise(slow, 0.9)
+        self.assertAlmostEqual(slow["ttd_norm_ms"], 900.0)
+        self.assertAlmostEqual(slow["ttd_light_norm_ms"], 90.0)
+        self.assertEqual(slow["nps_norm"], 1_000_000)
+        fast = {"ttd_ms": 1000.0, "ttd_light_ms": 100.0, "nps": 1_100_000}
+        bench.normalise(fast, 1.1)
+        self.assertAlmostEqual(fast["ttd_norm_ms"], 1100.0)
+        self.assertEqual(fast["nps_norm"], 1_000_000)
+
     def test_elo_record_needs_a_gain_beyond_the_combined_error(self):
         def e(v, err, ts):
             return {"value": v, "err": err, "ts": ts}

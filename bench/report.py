@@ -376,7 +376,7 @@ function sprtTable() {
   if (!rows.length) { t.innerHTML = '<tr><td class="empty">No head-to-head results yet.</td></tr>'; return; }
   let h = '<tr><th>Experiment</th><th>Commit</th><th class="num">Games</th><th class="num">Elo</th><th>Verdict</th></tr>';
   rows.forEach((r) => {
-    const elo = r.elo == null ? "\u2013" : `${r.elo > 0 ? "+" : ""}${r.elo.toFixed(0)} \u00b1 ${r.elo_err.toFixed(0)}`;
+    const elo = r.elo == null ? "\u2013" : `${r.elo > 0 ? "+" : ""}${r.elo.toFixed(0)}${r.elo_err == null ? "" : " \u00b1 " + r.elo_err.toFixed(0)}`;
     const ok = r.verdict === "H1", cls = ok ? "good" : "";
     const word = ok ? "better" : r.verdict === "H0" ? "no gain" : "inconclusive";
     h += `<tr><td>${esc(r.name)}</td><td class="mono">${esc(r.baseline)} &rarr; ${esc(r.candidate)}</td><td class="num mono">${r.games}</td>` +

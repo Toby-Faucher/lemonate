@@ -479,6 +479,16 @@ def anchor_load():
     return json.loads(ANCHOR.read_text()) if ANCHOR.exists() else None
 
 
+def normalise(m, drift):
+    """Add the drift-corrected fields to a measurement. `drift` > 1 means the machine is faster
+    now than when the anchor was calibrated, so raw times are too short and raw nps too high:
+    scale both back to the calibration machine."""
+    m["ttd_light_norm_ms"] = round(m["ttd_light_ms"] * drift, 2)
+    if m.get("ttd_ms"):
+        m["ttd_norm_ms"] = round(m["ttd_ms"] * drift, 2)
+    m["nps_norm"] = round(m["nps"] / drift)
+
+
 def measure_anchor(sh):
     """Re-time the anchor binary to correct for machine drift between sessions."""
     a = anchor_load()
@@ -529,10 +539,7 @@ def measure_rows(entries, anchor_every=8):
         since_anchor += 1
         set_anchor(sh, m)
         if m["status"] == "ok":
-            m["ttd_light_norm_ms"] = round(m["ttd_light_ms"] / drift, 2)
-            if m.get("ttd_ms"):
-                m["ttd_norm_ms"] = round(m["ttd_ms"] / drift, 2)
-            m["nps_norm"] = round(m["nps"] * drift)
+            normalise(m, drift)
         row = {**base, **m, "env": {**env, "drift": round(drift, 4)}}
         append_history(row)
         done_by_sh[sh] = row

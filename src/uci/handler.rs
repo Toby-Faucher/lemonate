@@ -34,6 +34,8 @@ struct WorkerResult {
 
 /// A search currently running on the worker thread.
 struct ActiveSearch {
+    /// True when nothing but `stop` can end this search (`go infinite`, or no limit at all).
+    endless: bool,
     stop: Arc<AtomicBool>,
     result_rx: mpsc::Receiver<WorkerResult>,
     handle: Option<thread::JoinHandle<()>>,
@@ -141,15 +143,20 @@ impl UciEngine {
         // loop can also poll for search completion.
         let (line_tx, line_rx) = mpsc::channel::<String>();
         thread::spawn(move || {
-            let stdin = io::stdin();
-            for line in stdin.lock().lines() {
-                match line {
-                    Ok(l) => {
-                        if line_tx.send(l).is_err() {
+            // Read raw bytes so one line that is not valid UTF-8 (a Latin-1 book path, say)
+            // does not end the engine; only EOF or a real I/O error does.
+            let mut stdin = io::stdin().lock();
+            let mut buf = Vec::new();
+            loop {
+                buf.clear();
+                match stdin.read_until(b'\n', &mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {
+                        let line = String::from_utf8_lossy(&buf).trim_end_matches(['\r', '\n']).to_string();
+                        if line_tx.send(line).is_err() {
                             break;
                         }
                     }
-                    Err(_) => break,
                 }
             }
         });
@@ -167,7 +174,16 @@ impl UciEngine {
                     }
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => continue,
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    // EOF (a piped script). A search that has its own limit is allowed to finish
+                    // and report, so `printf 'position startpos\ngo depth 12\n' | lemonate`
+                    // still prints a bestmove. An endless one can only end by `stop`.
+                    while self.active.as_ref().is_some_and(|a| !a.endless) {
+                        self.poll_search(&mut stdout);
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    break;
+                }
             }
         }
 
@@ -436,6 +452,17 @@ impl UciEngine {
             .go_params_to_limits(&params, Arc::clone(&stop))
             .with_overhead(self.move_overhead_ms);
 
+        let side_has_clock = match self.board.side_to_move() {
+            Color::White => params.wtime.is_some(),
+            Color::Black => params.btime.is_some(),
+        };
+        let endless = params.infinite
+            || (params.depth.is_none()
+                && params.mate.is_none()
+                && params.movetime.is_none()
+                && params.nodes.is_none()
+                && !side_has_clock);
+
         // Stream every finished iteration to the GUI while the search is still running.
         let started = Instant::now();
         limits = limits.with_info_sink(InfoSink::new(move |result: &SearchResult| {
@@ -502,6 +529,7 @@ impl UciEngine {
             .expect("failed to spawn search thread");
 
         self.active = Some(ActiveSearch {
+            endless,
             stop,
             result_rx,
             handle: Some(handle),
