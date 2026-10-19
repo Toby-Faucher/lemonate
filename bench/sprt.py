@@ -14,7 +14,8 @@ remote lock the gate uses, one at a time.
     sprt.py status [NAME...]                                          score / LLR / verdict
     sprt.py wait NAME                                                 block until finished
     sprt.py cancel NAME                                               stop a queued or running match
-    sprt.py record NAME ID                                            write research/experiments/ID from a finished match
+    sprt.py record NAME ID [--stopped]                                write research/experiments/ID from a finished match
+                                                                      (--stopped: a match ended by hand is recorded as inconclusive)
 
 BASE and CAND are git revisions (use commits, not the working tree).
 """
@@ -323,9 +324,9 @@ def record(args):
         sys.exit(f"no such match: {args.name}")
     meta = json.loads(meta_path.read_text())
     res = status_one(args.name)
-    if res["state"] != "FINISHED":
-        sys.exit(f"{args.name} has not finished ({res['state']})")
-    verdict = res["verdict"] or ""
+    if res["state"] != "FINISHED" and not args.stopped:
+        sys.exit(f"{args.name} has not finished ({res['state']}); use --stopped to record it as it stands")
+    verdict = "" if args.stopped else (res["verdict"] or "")
     status = {"H1": "accepted", "H0": "rejected"}.get(verdict, "inconclusive")
     sprt = {
         "games": res["games"], "wins": res["w"], "losses": res["l"], "draws": res["d"],
@@ -342,7 +343,9 @@ def record(args):
                  "sprt": "pass" if verdict == "H1" else "fail"},
         "sprt": sprt,
         "status": status,
-        "reason": args.reason or f"SPRT bounds [{meta['elo0']}, {meta['elo1']}] run with bench/sprt.py, not research/scripts/gate.sh",
+        "reason": args.reason or (
+            f"stopped by hand at {res['games']} games with no verdict" if args.stopped else
+            f"SPRT bounds [{meta['elo0']}, {meta['elo1']}] run with bench/sprt.py, not research/scripts/gate.sh"),
     }
     (out / "result.json").write_text(json.dumps(result, indent=2) + "\n")
     (out / "sprt.json").write_text(json.dumps(sprt, indent=2) + "\n")
@@ -394,6 +397,8 @@ def main():
     s = sub.add_parser("record")
     s.add_argument("name"), s.add_argument("id")
     s.add_argument("--reason", help="one line shown in the catalog note")
+    s.add_argument("--stopped", action="store_true",
+                   help="record a match that was cancelled before it finished, as inconclusive")
     s.set_defaults(fn=record)
     args = ap.parse_args()
     args.fn(args)
