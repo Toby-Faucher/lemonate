@@ -16,6 +16,28 @@ use std::time::{Duration, Instant};
 
 use crate::board::Move;
 
+use super::SearchResult;
+
+/// Receives the result of every completed iterative-deepening iteration (UCI `info` stream).
+#[derive(Clone)]
+pub struct InfoSink(Arc<dyn Fn(&SearchResult) + Send + Sync>);
+
+impl InfoSink {
+    pub fn new(f: impl Fn(&SearchResult) + Send + Sync + 'static) -> Self {
+        Self(Arc::new(f))
+    }
+
+    pub fn emit(&self, result: &SearchResult) {
+        (self.0)(result)
+    }
+}
+
+impl std::fmt::Debug for InfoSink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("InfoSink")
+    }
+}
+
 /// Default number of moves to assume remaining in sudden death.
 const DEFAULT_MOVES_TO_GO: u32 = 30;
 
@@ -65,6 +87,11 @@ pub struct SearchLimits {
     /// Shared stop flag allowing another thread to halt the search
     /// (UCI `stop` command, optional).
     pub stop_signal: Option<Arc<AtomicBool>>,
+    /// Time reserved for GUI and communication latency, taken off the budget (UCI
+    /// `Move Overhead`). Applies to `movetime` and game-clock searches.
+    pub overhead_ms: u64,
+    /// Called after every completed iteration, for streaming `info` lines (optional).
+    pub info_sink: Option<InfoSink>,
 }
 
 impl SearchLimits {
@@ -76,6 +103,8 @@ impl SearchLimits {
             max_nodes: None,
             root_moves: None,
             stop_signal: None,
+            overhead_ms: 0,
+            info_sink: None,
         }
     }
 
@@ -87,6 +116,8 @@ impl SearchLimits {
             max_nodes: None,
             root_moves: None,
             stop_signal: None,
+            overhead_ms: 0,
+            info_sink: None,
         }
     }
 
@@ -98,6 +129,8 @@ impl SearchLimits {
             max_nodes: None,
             root_moves: None,
             stop_signal: None,
+            overhead_ms: 0,
+            info_sink: None,
         }
     }
 
@@ -113,6 +146,8 @@ impl SearchLimits {
             max_nodes: None,
             root_moves: None,
             stop_signal: None,
+            overhead_ms: 0,
+            info_sink: None,
         }
     }
 
@@ -131,6 +166,18 @@ impl SearchLimits {
     /// Restrict the root search to the given moves.
     pub fn with_root_moves(mut self, moves: Vec<Move>) -> Self {
         self.root_moves = Some(moves);
+        self
+    }
+
+    /// Reserve `ms` milliseconds for communication latency.
+    pub fn with_overhead(mut self, ms: u64) -> Self {
+        self.overhead_ms = ms;
+        self
+    }
+
+    /// Report every completed iteration to `sink`.
+    pub fn with_info_sink(mut self, sink: InfoSink) -> Self {
+        self.info_sink = Some(sink);
         self
     }
 
@@ -174,14 +221,17 @@ pub struct TimeManager {
 impl TimeManager {
     /// Create a new time manager with the given limits.
     pub fn new(limits: &SearchLimits) -> Self {
+        let overhead = Duration::from_millis(limits.overhead_ms);
         let (soft_limit, hard_limit, use_time_limit) = match &limits.time_control {
             TimeControl::FixedDepth(_) => {
                 // No time limit for fixed depth.
                 (Duration::MAX, Duration::MAX, false)
             }
             TimeControl::FixedTime(duration) => {
-                // Soft limit is a fraction of the specified time.
-                let hard = *duration;
+                // Soft limit is a fraction of the specified time, after the reserve.
+                let hard = duration
+                    .saturating_sub(overhead)
+                    .max(Duration::from_millis(MIN_TIME_MS));
                 let soft_ms = (hard.as_millis() as f64 * SOFT_LIMIT_FRACTION) as u64;
                 let soft = Duration::from_millis(soft_ms.max(MIN_TIME_MS));
                 (soft, hard, true)
@@ -191,7 +241,8 @@ impl TimeManager {
                 increment,
                 moves_to_go,
             } => {
-                let (soft, hard) = Self::calculate_time_budget(*remaining, *increment, *moves_to_go);
+                let usable = remaining.saturating_sub(overhead);
+                let (soft, hard) = Self::calculate_time_budget(usable, *increment, *moves_to_go);
                 (soft, hard, true)
             }
             TimeControl::Infinite => {
@@ -678,5 +729,33 @@ mod tests {
 
         assert!(tm.soft_limit().as_millis() >= MIN_TIME_MS as u128);
         assert!(tm.hard_limit().as_millis() >= MIN_TIME_MS as u128);
+    }
+
+    #[test]
+    fn overhead_is_taken_off_a_fixed_time_budget() {
+        let tm = TimeManager::new(&SearchLimits::movetime(100).with_overhead(30));
+        assert_eq!(tm.hard_limit, Duration::from_millis(70));
+    }
+
+    #[test]
+    fn overhead_larger_than_the_budget_still_leaves_one_millisecond() {
+        let tm = TimeManager::new(&SearchLimits::movetime(20).with_overhead(5_000));
+        assert_eq!(tm.hard_limit, Duration::from_millis(MIN_TIME_MS));
+    }
+
+    #[test]
+    fn overhead_shrinks_a_game_clock_budget() {
+        let plain = TimeManager::new(&SearchLimits::game_clock(10_000, 0, None));
+        let reserved = TimeManager::new(&SearchLimits::game_clock(10_000, 0, None).with_overhead(1_000));
+        let (_, expected_hard) =
+            TimeManager::calculate_time_budget(Duration::from_millis(9_000), Duration::ZERO, None);
+        assert_eq!(reserved.hard_limit, expected_hard);
+        assert!(reserved.hard_limit < plain.hard_limit);
+    }
+
+    #[test]
+    fn no_overhead_changes_nothing() {
+        let tm = TimeManager::new(&SearchLimits::movetime(100));
+        assert_eq!(tm.hard_limit, Duration::from_millis(100));
     }
 }

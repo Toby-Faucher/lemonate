@@ -66,7 +66,12 @@ pub fn parallel_search(
     let mut handles = Vec::with_capacity(num_threads);
     for thread_id in 0..num_threads {
         let board = board.clone();
-        let limits = limits.clone();
+        let mut limits = limits.clone();
+        // Only worker 0 reports iterations; helpers search at staggered depths and would
+        // interleave misleading lines.
+        if thread_id != 0 {
+            limits.info_sink = None;
+        }
         let shared = Arc::clone(shared);
         // Stagger starting depths for diversity (worker i starts at
         // depth 1+i, clamped to the depth cap inside the engine).

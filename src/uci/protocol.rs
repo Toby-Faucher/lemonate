@@ -11,6 +11,16 @@ pub const HASH_MIN_MB: usize = 1;
 pub const HASH_MAX_MB: usize = 4096;
 pub const HASH_DEFAULT_MB: usize = 64;
 
+/// Advertised `Move Overhead` option range, in milliseconds.
+pub const OVERHEAD_MIN_MS: u64 = 0;
+pub const OVERHEAD_MAX_MS: u64 = 5000;
+pub const OVERHEAD_DEFAULT_MS: u64 = 10;
+
+/// Clamp a requested `Move Overhead` to the advertised range.
+pub fn clamp_overhead_ms(requested: u64) -> u64 {
+    requested.clamp(OVERHEAD_MIN_MS, OVERHEAD_MAX_MS)
+}
+
 /// Clamp a requested `Hash` size to the advertised range.
 pub fn clamp_hash_mb(requested: usize) -> usize {
     requested.clamp(HASH_MIN_MB, HASH_MAX_MB)
@@ -295,6 +305,11 @@ pub fn format_uci_id() -> String {
         HASH_DEFAULT_MB, HASH_MIN_MB, HASH_MAX_MB
     ));
     output.push_str("option name Threads type spin default 1 min 1 max 256\n");
+    output.push_str(&format!(
+        "option name Move Overhead type spin default {} min {} max {}\n",
+        OVERHEAD_DEFAULT_MS, OVERHEAD_MIN_MS, OVERHEAD_MAX_MS
+    ));
+    output.push_str("option name Clear Hash type button\n");
     output.push_str("option name OwnBook type check default false\n");
     output.push_str("option name BookFile type string default <empty>\n");
     output.push_str("\n");
@@ -328,6 +343,7 @@ pub fn format_info(result: &SearchResult, elapsed_ms: u128) -> String {
     // Nodes and NPS.
     info.push_str(&format!(" nodes {}", result.stats.nodes));
     info.push_str(&format!(" nps {}", result.stats.nps(elapsed_ms)));
+    info.push_str(&format!(" hashfull {}", result.stats.hashfull));
     info.push_str(&format!(" time {}", elapsed_ms));
 
     // Principal variation.
@@ -465,6 +481,29 @@ mod tests {
             UciCommand::Go(p) => assert_eq!(p.depth, Some(u8::MAX)),
             _ => panic!("expected Go"),
         }
+    }
+
+    #[test]
+    fn move_overhead_is_clamped_to_the_advertised_range() {
+        assert_eq!(clamp_overhead_ms(0), 0);
+        assert_eq!(clamp_overhead_ms(99_999), OVERHEAD_MAX_MS);
+        assert_eq!(clamp_overhead_ms(25), 25);
+    }
+
+    #[test]
+    fn the_uci_reply_advertises_overhead_and_clear_hash() {
+        let id = format_uci_id();
+        assert!(id.contains("option name Move Overhead type spin default 10 min 0 max 5000"), "{id}");
+        assert!(id.contains("option name Clear Hash type button"), "{id}");
+    }
+
+    #[test]
+    fn info_lines_carry_hashfull() {
+        let mut result = crate::search::SearchResult::default();
+        result.depth = 5;
+        result.stats.hashfull = 123;
+        let line = format_info(&result, 50);
+        assert!(line.contains(" hashfull 123 time 50"), "{line}");
     }
 
     #[test]

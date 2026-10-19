@@ -8,12 +8,14 @@
 
 use crate::board::{Board, Move, MoveType};
 use crate::book::BookManager;
-use crate::search::{parallel_search, SearchEngine, SearchLimits, SearchResult, SharedTT, MAX_DEPTH};
+use crate::search::{
+    parallel_search, InfoSink, SearchEngine, SearchLimits, SearchResult, SharedTT, MAX_DEPTH,
+};
 use crate::types::Color;
 
 use super::protocol::{
-    clamp_hash_mb, format_bestmove, format_info, format_uci_id, parse_command, parse_uci_move,
-    GoParams, UciCommand, HASH_DEFAULT_MB,
+    clamp_hash_mb, clamp_overhead_ms, format_bestmove, format_info, format_uci_id, parse_command, parse_uci_move,
+    GoParams, UciCommand, HASH_DEFAULT_MB, OVERHEAD_DEFAULT_MS,
 };
 
 use std::io::{self, BufRead, Write};
@@ -60,6 +62,8 @@ pub struct UciEngine {
     /// Polyglot opening book (`BookFile`), consulted when `OwnBook` is on.
     book: BookManager,
     own_book: bool,
+    /// `Move Overhead` option: milliseconds per move reserved for GUI latency.
+    move_overhead_ms: u64,
 }
 
 impl UciEngine {
@@ -79,6 +83,7 @@ impl UciEngine {
             hash_mb: HASH_DEFAULT_MB,
             book: BookManager::new(),
             own_book: false,
+            move_overhead_ms: OVERHEAD_DEFAULT_MS,
         }
     }
 
@@ -273,6 +278,19 @@ impl UciEngine {
                     }
                 }
             }
+            "move overhead" => {
+                if let Some(Ok(ms)) = value.map(|v| v.trim().parse::<u64>()) {
+                    self.move_overhead_ms = clamp_overhead_ms(ms);
+                }
+            }
+            "clear hash" => {
+                let mut engine = self.take_engine();
+                engine.clear_hash();
+                self.engine = Some(engine);
+                if let Some(tt) = &self.shared_tt {
+                    tt.clear();
+                }
+            }
             "ownbook" => {
                 if let Some(v) = value {
                     self.own_book = v.trim().eq_ignore_ascii_case("true");
@@ -414,7 +432,18 @@ impl UciEngine {
         }
 
         let stop = Arc::new(AtomicBool::new(false));
-        let mut limits = self.go_params_to_limits(&params, Arc::clone(&stop));
+        let mut limits = self
+            .go_params_to_limits(&params, Arc::clone(&stop))
+            .with_overhead(self.move_overhead_ms);
+
+        // Stream every finished iteration to the GUI while the search is still running.
+        let started = Instant::now();
+        limits = limits.with_info_sink(InfoSink::new(move |result: &SearchResult| {
+            let line = format_info(result, started.elapsed().as_millis());
+            let mut out = io::stdout().lock();
+            let _ = writeln!(out, "{}", line);
+            let _ = out.flush();
+        }));
 
         // Resolve UCI searchmoves strings to legal moves now; the engine
         // enforces the restriction at the root.
