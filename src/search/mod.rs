@@ -64,6 +64,15 @@ pub const NULL_MOVE_MIN_DEPTH: i32 = 3;
 /// Minimum depth for internal iterative reduction (no hash move).
 pub const IIR_MIN_DEPTH: i32 = 4;
 
+/// Singular extensions: minimum depth at which the hash move is tested.
+pub const SINGULAR_MIN_DEPTH: i32 = 7;
+
+/// Singular extensions: the hash entry must be at least `depth - SINGULAR_DEPTH_MARGIN` deep.
+pub const SINGULAR_DEPTH_MARGIN: i32 = 3;
+
+/// Singular extensions: the verification beta is `hash score - SINGULAR_BETA_MARGIN * depth`.
+pub const SINGULAR_BETA_MARGIN: i32 = 2;
+
 /// Late move reduction thresholds.
 pub const LMR_FULL_DEPTH_MOVES: usize = 3;
 pub const LMR_REDUCTION_LIMIT: i32 = 3;
@@ -475,7 +484,7 @@ impl SearchEngine {
                 self.aspiration_search(&mut board, depth, result.score)
             } else {
                 // Full window search.
-                let score = self.negamax(&mut board, depth as i32, -INFINITY, INFINITY, 0);
+                let score = self.negamax(&mut board, depth as i32, -INFINITY, INFINITY, 0, None);
                 let best_move = match self.pv_first_move() {
                     Some(mv) => Some(mv),
                     None => self.get_hash_move(board.position_hash()),
@@ -542,7 +551,7 @@ impl SearchEngine {
         let mut beta = (previous_score + delta).min(INFINITY);
 
         loop {
-            let score = self.negamax(board, depth as i32, alpha, beta, 0);
+            let score = self.negamax(board, depth as i32, alpha, beta, 0, None);
 
             // Check for time out.
             if self.should_stop() {
@@ -598,6 +607,8 @@ impl SearchEngine {
     /// * `alpha` - Lower bound (best score we can guarantee)
     /// * `beta` - Upper bound (opponent's best guarantee)
     /// * `ply` - Distance from root (for mate scoring)
+    /// * `excluded` - Move to skip (singular verification search only); such a node
+    ///   neither reads nor writes the transposition table and does no null move or IIR
     ///
     /// # Returns
     /// The score of the position from the current player's perspective.
@@ -608,6 +619,7 @@ impl SearchEngine {
         mut alpha: i32,
         beta: i32,
         ply: u8,
+        excluded: Option<Move>,
     ) -> i32 {
         // Save original alpha for TT entry type determination.
         let original_alpha = alpha;
@@ -675,12 +687,15 @@ impl SearchEngine {
 
         // TT probing - get hash move and potentially cutoff
         let mut hash_move: Option<Move> = None;
+        let mut hash_entry: Option<TranspositionEntry> = None;
         if let Some(entry) = self.tt_probe(hash) {
             self.stats.tt_hits += 1;
             hash_move = entry.best_move;
+            hash_entry = Some(entry);
 
-            // TT cutoff for non-PV nodes with sufficient depth
-            if !is_pv && entry.depth >= depth as u8 {
+            // TT cutoff for non-PV nodes with sufficient depth (never in a verification
+            // search: the entry describes the position with the excluded move included).
+            if !is_pv && excluded.is_none() && entry.depth >= depth as u8 {
                 if let Some(score) = entry.get_score(alpha, beta) {
                     self.stats.tt_cutoffs += 1;
                     let adjusted = TranspositionTable::adjust_score_for_retrieval(score, ply);
@@ -739,12 +754,13 @@ impl SearchEngine {
 
         // Internal iterative reduction: with no hash move the ordering is
         // poor, so search one ply shallower (depth stays >= IIR_MIN_DEPTH - 1).
-        if !in_check && depth >= IIR_MIN_DEPTH && hash_move.is_none() {
+        if !in_check && depth >= IIR_MIN_DEPTH && hash_move.is_none() && excluded.is_none() {
             depth -= 1;
         }
 
         // Null move pruning
         if !is_pv
+            && excluded.is_none()
             && !in_check
             && depth >= NULL_MOVE_MIN_DEPTH
             && static_eval >= beta
@@ -752,6 +768,37 @@ impl SearchEngine {
         {
             if let Some(score) = self.null_move_prune(board, depth, beta, ply) {
                 return score;
+            }
+        }
+
+        // Singular extension: if every move except the hash move fails well below the hash
+        // score, the hash move is the only good one here and is searched a ply deeper.
+        // The verification reuses this ply's buffers and is stored nowhere.
+        let mut singular_ext = 0;
+        if ply > 0
+            && excluded.is_none()
+            && depth >= SINGULAR_MIN_DEPTH
+            && let (Some(hm), Some(entry)) = (hash_move, hash_entry)
+            && entry.depth as i32 >= depth - SINGULAR_DEPTH_MARGIN
+            && entry.entry_type != EntryType::UpperBound
+            && !is_mate_score(entry.score)
+            && self.move_buffers[ply as usize].iter().any(|m| is_same_move(m, &hm))
+        {
+            let tt_score = TranspositionTable::adjust_score_for_retrieval(entry.score, ply);
+            let singular_beta = tt_score - SINGULAR_BETA_MARGIN * depth;
+            let score = self.negamax(
+                board,
+                (depth - 1) / 2,
+                singular_beta - 1,
+                singular_beta,
+                ply,
+                Some(hm),
+            );
+            if self.should_stop() {
+                return 0;
+            }
+            if score < singular_beta {
+                singular_ext = 1;
             }
         }
 
@@ -811,6 +858,10 @@ impl SearchEngine {
                 }
             }
 
+            if excluded.is_some_and(|ex| is_same_move(&ex, &mv)) {
+                continue;
+            }
+
             move_count += 1;
             let is_capture = mv.captured.is_some();
             let is_tactical = self.is_tactical(&mv);
@@ -862,19 +913,24 @@ impl SearchEngine {
             // re-searched if it turns out to beat alpha. Scouts are non-PV nodes, so the
             // pruning that is off in PV nodes (TT cutoffs, reverse futility, null move,
             // futility) applies to them.
+            let ext = if singular_ext > 0 && hash_move.is_some_and(|hm| is_same_move(&hm, &mv)) {
+                singular_ext
+            } else {
+                0
+            };
             let mut score;
             if move_count == 1 {
-                score = -self.negamax(board, depth - 1, -beta, -alpha, ply + 1);
+                score = -self.negamax(board, depth - 1 + ext, -beta, -alpha, ply + 1, None);
             } else {
-                score = -self.negamax(board, depth - 1 - reduction, -alpha - 1, -alpha, ply + 1);
+                score = -self.negamax(board, depth - 1 - reduction, -alpha - 1, -alpha, ply + 1, None);
                 // A reduced scout that beat alpha is repeated at full depth, still null-window.
                 if score > alpha && reduction > 0 {
-                    score = -self.negamax(board, depth - 1, -alpha - 1, -alpha, ply + 1);
+                    score = -self.negamax(board, depth - 1 + ext, -alpha - 1, -alpha, ply + 1, None);
                 }
                 // Only a move that lands strictly inside the window needs the full-window search
                 // (in a non-PV node beta == alpha + 1, so this never fires there).
                 if score > alpha && score < beta {
-                    score = -self.negamax(board, depth - 1, -beta, -alpha, ply + 1);
+                    score = -self.negamax(board, depth - 1 + ext, -beta, -alpha, ply + 1, None);
                 }
             }
 
@@ -937,16 +993,18 @@ impl SearchEngine {
                             );
                         }
 
-                        // Store in TT with adjusted mate score.
-                        let stored_score =
-                            TranspositionTable::adjust_score_for_storage(score, ply);
-                        self.tt_store(
-                            hash,
-                            stored_score,
-                            depth as u8,
-                            EntryType::LowerBound,
-                            Some(mv),
-                        );
+                        // Store in TT with adjusted mate score (not from a verification search).
+                        if excluded.is_none() {
+                            let stored_score =
+                                TranspositionTable::adjust_score_for_storage(score, ply);
+                            self.tt_store(
+                                hash,
+                                stored_score,
+                                depth as u8,
+                                EntryType::LowerBound,
+                                Some(mv),
+                            );
+                        }
 
                         return score;
                     }
@@ -961,8 +1019,10 @@ impl SearchEngine {
             EntryType::Exact
         };
 
-        let stored_score = TranspositionTable::adjust_score_for_storage(best_score, ply);
-        self.tt_store(hash, stored_score, depth as u8, entry_type, best_move);
+        if excluded.is_none() {
+            let stored_score = TranspositionTable::adjust_score_for_storage(best_score, ply);
+            self.tt_store(hash, stored_score, depth as u8, entry_type, best_move);
+        }
 
         best_score
     }
@@ -1169,6 +1229,7 @@ impl SearchEngine {
             -beta,
             -beta + 1,
             ply + 1,
+            None,
         );
 
         // Unmake null move.
@@ -1577,6 +1638,27 @@ mod tests {
             "Search must respect node limit, used {}",
             total
         );
+    }
+
+    #[test]
+    fn excluded_move_is_never_searched_or_stored() {
+        let board = Board::starting_position();
+        let mut engine = SearchEngine::new();
+        let best = engine
+            .search(&board, SearchLimits::depth(5))
+            .best_move
+            .expect("Should find a move");
+
+        engine.time_manager = TimeManager::new(&SearchLimits::depth(5));
+        engine.time_manager.start();
+        let hash = board.position_hash();
+        let before = engine.tt_probe(hash).map(|e| (e.score, e.depth, e.best_move));
+        let mut b = board.clone();
+        engine.negamax(&mut b, 4, -INFINITY, INFINITY, 0, Some(best));
+        assert!(engine.pv_len[0] > 0);
+        assert!(!is_same_move(&engine.pv[0][0], &best), "excluded move was chosen");
+        let after = engine.tt_probe(hash).map(|e| (e.score, e.depth, e.best_move));
+        assert_eq!(before.map(|x| (x.0, x.1)), after.map(|x| (x.0, x.1)), "TT written");
     }
 
     #[test]
