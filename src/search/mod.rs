@@ -34,6 +34,7 @@ mod time_manager;
 mod transposition;
 
 pub use history::{CounterMoveTable, HistoryTable};
+use history::{cont_key, ContinuationHistory, NO_PREV};
 pub use killer_moves::KillerMoveTable;
 pub use move_ordering::{is_good_capture, order_captures_into, MoveOrderer, ScoredMove, MAX_MOVES};
 pub use smp::{parallel_search, MAX_THREADS};
@@ -206,6 +207,10 @@ pub struct SearchEngine {
     history: HistoryTable,
     /// Counter move table.
     counters: CounterMoveTable,
+    /// Continuation history: quiet move scores conditioned on the moves one and two plies back.
+    cont_history: ContinuationHistory,
+    /// Key of the move played at each ply of the current line (`NO_PREV` after a null move).
+    move_stack: [u16; PV_SIZE + 2],
     /// Position evaluator.
     evaluator: Evaluator,
     /// Time manager.
@@ -237,6 +242,8 @@ impl SearchEngine {
             killers: KillerMoveTable::new(),
             history: HistoryTable::new(),
             counters: CounterMoveTable::new(),
+            cont_history: ContinuationHistory::new(),
+            move_stack: [NO_PREV; PV_SIZE + 2],
             evaluator: Evaluator::new(),
             time_manager: TimeManager::default(),
             stats: SearchStats::default(),
@@ -268,6 +275,7 @@ impl SearchEngine {
         self.killers.clear();
         self.history.clear();
         self.counters.clear();
+        self.cont_history.clear();
         self.stats.reset();
         self.pv_len = [0; PV_SIZE];
         for buf in &mut self.move_buffers {
@@ -370,6 +378,7 @@ impl SearchEngine {
 
         // Age history table for fresh search.
         self.history.age();
+        self.cont_history.age();
 
         // Clear killers for new search.
         self.killers.clear();
@@ -409,6 +418,7 @@ impl SearchEngine {
 
         // Age history table for fresh search.
         self.history.age();
+        self.cont_history.age();
 
         // Clear killers for new search.
         self.killers.clear();
@@ -744,6 +754,20 @@ impl SearchEngine {
             killer_moves,
             &self.history,
         );
+        // Continuation history: favour quiet moves that have worked after the moves one and
+        // two plies back on this line.
+        {
+            let p = ply as usize;
+            let prev1 = if p >= 1 { self.move_stack[p - 1] } else { NO_PREV };
+            let prev2 = if p >= 2 { self.move_stack[p - 2] } else { NO_PREV };
+            if prev1 != NO_PREV || prev2 != NO_PREV {
+                let cont = &self.cont_history;
+                orderer.add_quiet_bonus(|mv| {
+                    let key = cont_key(mv);
+                    cont.get(prev1, key) + cont.get(prev2, key)
+                });
+            }
+        }
 
         // Enforce UCI `searchmoves` restriction at the root.
         // Pre-scan (instead of filtering a collected Vec): if nothing legal
@@ -819,6 +843,7 @@ impl SearchEngine {
 
             // The position we are leaving joins the path for the children's repetition check.
             self.path.push(hash);
+            self.move_stack[ply as usize] = cont_key(&mv);
 
             // Principal variation search. The first move gets the full window. Every later
             // move is scouted with a null window (reduced when LMR applies) and only
@@ -1123,6 +1148,7 @@ impl SearchEngine {
         let leaving = board.position_hash();
         board.make_null_move();
         self.path.push(leaving);
+        self.move_stack[ply as usize] = NO_PREV;
 
         // Search with reduced depth.
         let reduction = NULL_MOVE_REDUCTION + depth / 6;
@@ -1210,6 +1236,25 @@ impl SearchEngine {
 
         // Update history heuristic.
         self.history.update(color, mv, quiets_tried, depth);
+
+        // Update continuation history against the moves one and two plies back.
+        let p = ply as usize;
+        let bonus = depth * depth;
+        for back in [1usize, 2] {
+            if p < back {
+                continue;
+            }
+            let prev = self.move_stack[p - back];
+            if prev == NO_PREV {
+                continue;
+            }
+            self.cont_history.update(prev, cont_key(mv), bonus);
+            for q in quiets_tried {
+                if q != mv {
+                    self.cont_history.update(prev, cont_key(q), -bonus);
+                }
+            }
+        }
     }
 
     /// Extract principal variation from the transposition table.

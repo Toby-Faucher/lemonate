@@ -186,6 +186,20 @@ impl MoveOrderer {
         }
     }
 
+    /// Add `bonus(mv)` to every plain quiet move (not the hash move, a killer, a capture or a
+    /// promotion). Called once after construction, before the first `next`.
+    pub fn add_quiet_bonus<F: Fn(&Move) -> i32>(&mut self, bonus: F) {
+        for i in 0..self.len {
+            let mv = self.moves[i].mv;
+            if mv.captured.is_none()
+                && !matches!(mv.move_type, MoveType::Promotion(_))
+                && self.moves[i].score < scores::KILLER_SECONDARY
+            {
+                self.moves[i].score += bonus(&mv);
+            }
+        }
+    }
+
     /// Get the next best move using partial sorting.
     ///
     /// Uses selection sort to find the best remaining move,

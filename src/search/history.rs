@@ -205,8 +205,85 @@ impl Default for CounterMoveTable {
     }
 }
 
+/// Number of (piece, destination) keys: 12 piece kinds x 64 squares.
+const CONT_KEYS: usize = 12 * 64;
+
+/// Marks "no previous move" (root, or just after a null move).
+pub const NO_PREV: u16 = u16::MAX;
+
+/// Key for a move in the continuation history: which piece went to which square.
+#[inline]
+pub fn cont_key(mv: &Move) -> u16 {
+    ((mv.piece.color as usize * 6 + mv.piece.piece_type as usize) * 64 + mv.to.index()) as u16
+}
+
+/// Continuation history: how well a quiet move has done right after a given earlier move.
+///
+/// Indexed [earlier move key][this move key]. The earlier move is the one played one or two
+/// plies before, so the table learns follow-ups ("after Nf3, Bg5 tends to be good") that the
+/// plain from/to history cannot see.
+pub struct ContinuationHistory {
+    table: Vec<i32>,
+}
+
+impl ContinuationHistory {
+    pub fn new() -> Self {
+        Self {
+            table: vec![0; CONT_KEYS * CONT_KEYS],
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.table.iter_mut().for_each(|v| *v = 0);
+    }
+
+    /// Halve every score (called at the start of a search, like the plain history).
+    pub fn age(&mut self) {
+        self.table.iter_mut().for_each(|v| *v /= 2);
+    }
+
+    #[inline]
+    pub fn get(&self, prev: u16, key: u16) -> i32 {
+        if prev == NO_PREV {
+            return 0;
+        }
+        self.table[prev as usize * CONT_KEYS + key as usize]
+    }
+
+    /// Move the score towards `bonus` with the same gravity as the plain history.
+    #[inline]
+    pub fn update(&mut self, prev: u16, key: u16, bonus: i32) {
+        if prev == NO_PREV {
+            return;
+        }
+        let slot = &mut self.table[prev as usize * CONT_KEYS + key as usize];
+        let new_score = *slot + bonus - (*slot * bonus.abs() / MAX_HISTORY_SCORE);
+        *slot = new_score.clamp(-MAX_HISTORY_SCORE, MAX_HISTORY_SCORE);
+    }
+}
+
+impl Default for ContinuationHistory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn continuation_history_learns_and_ignores_missing_previous_move() {
+        let mut c = ContinuationHistory::new();
+        assert_eq!(c.get(5, 9), 0);
+        c.update(5, 9, 100);
+        assert!(c.get(5, 9) > 0);
+        assert_eq!(c.get(5, 10), 0);
+        // No previous move: nothing to read or write.
+        c.update(NO_PREV, 9, 100);
+        assert_eq!(c.get(NO_PREV, 9), 0);
+        c.update(5, 9, -10_000_000);
+        assert!(c.get(5, 9) >= -MAX_HISTORY_SCORE);
+    }
+
     use super::*;
     use crate::board::MoveType;
     use crate::types::{Piece, PieceType, Square};
@@ -445,3 +522,4 @@ mod tests {
         assert_eq!(table.get(&prev2), Some(counter2));
     }
 }
+
