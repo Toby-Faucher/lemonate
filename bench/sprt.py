@@ -39,14 +39,14 @@ RESEARCH = tomllib.loads((ROOT / "research" / "config.toml").read_text())
 BENCH_CFG = json.loads((BENCH / "config.json").read_text())
 HOST = RESEARCH["remote"]["host"]
 LOCK = RESEARCH["remote"]["lock"]
-# The local runner: cutechess-cli in a small Debian container on the 16 performance-core threads (the
+# The local runner: cutechess-cli in a small Debian container on 8 of the performance-core threads (the
 # efficiency cores are left alone so both engines of a game run on equal cores) at low priority, because
 # this machine also hosts services. Do not run bench.py while a local match plays: it pins to cpu 14.
 RUNNER = WORK.parent / "runner"
 LOCAL_IMAGE = "lemonate-cutechess"
 LOCAL_LOCK = "/tmp/lemonate-sprt-local.lock"
-LOCAL_CPUS = "0-15"
-LOCAL_CONCURRENCY = 16
+LOCAL_CPUS = "0-7"
+LOCAL_CONCURRENCY = 8
 RUNNERS = ("chess-test", "bawn")
 # Portable: the match machine is a different CPU from the build machine.
 RUSTFLAGS = "-C target-cpu=x86-64-v3 -C target-feature=+bmi2,+popcnt"
