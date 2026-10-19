@@ -742,7 +742,7 @@ def read_sprt():
         t = d.get("sprt") or {}
         if not t.get("games"):
             continue
-        out.append({"name": f.parent.name, "candidate": d["candidate_commit"][:7], "baseline": d["baseline_commit"][:7],
+        out.append({"name": f.parent.name, "candidate": (d.get("candidate_commit") or "?")[:7], "baseline": (d.get("baseline_commit") or "?")[:7],
                     "games": t["games"], "elo": t.get("elo"), "elo_err": t.get("elo_err"),
                     "verdict": t.get("verdict", "?"), "status": d.get("status", "")})
     return out
