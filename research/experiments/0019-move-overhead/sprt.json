@@ -1,0 +1,10 @@
+{
+  "games": 2470,
+  "wins": 881,
+  "losses": 843,
+  "draws": 746,
+  "elo": null,
+  "elo_err": null,
+  "llr": null,
+  "verdict": "inconclusive"
+}

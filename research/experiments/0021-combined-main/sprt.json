@@ -1,0 +1,10 @@
+{
+  "games": 272,
+  "wins": 182,
+  "losses": 35,
+  "draws": 55,
+  "elo": 210.1,
+  "elo_err": 41.8,
+  "llr": 2.95,
+  "verdict": "H1"
+}

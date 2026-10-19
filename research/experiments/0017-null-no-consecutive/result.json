@@ -1,0 +1,24 @@
+{
+  "baseline_commit": "8a0e1ed8f24699e456634824265b94981cb69722",
+  "candidate_commit": "3c4c111541f780fc3868b4f952e41830ed9cb3de",
+  "config_hash": "bench-sprt",
+  "gate": {
+    "preflight": "skipped",
+    "build": "pass",
+    "test": "pass",
+    "perft": "pass",
+    "sprt": "fail"
+  },
+  "sprt": {
+    "games": 1025,
+    "wins": 366,
+    "losses": 357,
+    "draws": 302,
+    "elo": null,
+    "elo_err": null,
+    "llr": null,
+    "verdict": "inconclusive"
+  },
+  "status": "inconclusive",
+  "reason": "stopped by hand at 1025 games with no verdict"
+}

@@ -1,0 +1,760 @@
+diff --git a/src/search/mod.rs b/src/search/mod.rs
+index c8791f0..54a4633 100644
+--- a/src/search/mod.rs
++++ b/src/search/mod.rs
+@@ -37,7 +37,7 @@ pub use history::{CounterMoveTable, HistoryTable};
+ pub use killer_moves::KillerMoveTable;
+ pub use move_ordering::{is_good_capture, order_captures_into, MoveOrderer, ScoredMove, MAX_MOVES};
+ pub use smp::{parallel_search, MAX_THREADS};
+-pub use time_manager::{SearchLimits, TimeControl, TimeManager};
++pub use time_manager::{InfoSink, SearchLimits, TimeControl, TimeManager};
+ pub use transposition::{EntryType, SharedTT, TranspositionEntry, TranspositionTable};
+ 
+ use crate::board::{Move, MoveType};
+@@ -146,6 +146,8 @@ pub struct SearchStats {
+     pub depth: u8,
+     /// Selective depth (max ply reached).
+     pub seldepth: u8,
++    /// Transposition table fill in permille (0-1000), sampled when the iteration finished.
++    pub hashfull: u16,
+ }
+ 
+ impl SearchStats {
+@@ -222,6 +224,8 @@ pub struct SearchEngine {
+     /// back to the last irreversible move. `path_root` is where the search proper starts.
+     path: Vec<u64>,
+     path_root: usize,
++    /// Where completed iterations are reported (UCI `info` stream), if anywhere.
++    info_sink: Option<InfoSink>,
+ }
+ 
+ impl SearchEngine {
+@@ -242,6 +246,7 @@ impl SearchEngine {
+             move_buffers: Vec::new(),
+             path: Vec::new(),
+             path_root: 0,
++            info_sink: None,
+         }
+     }
+ 
+@@ -304,6 +309,14 @@ impl SearchEngine {
+         }
+     }
+ 
++    /// Fill of the active transposition table in permille.
++    fn tt_hashfull(&self) -> u16 {
++        match &self.shared {
++            Some(shared) => shared.hashfull(),
++            None => self.tt.hashfull(),
++        }
++    }
++
+     /// Bump the age of the active transposition table.
+     fn tt_new_search(&mut self) {
+         if let Some(shared) = &self.shared {
+@@ -339,6 +352,7 @@ impl SearchEngine {
+ 
+         // Store root move restriction (UCI searchmoves).
+         self.root_moves = limits.root_moves.clone();
++        self.info_sink = limits.info_sink.clone();
+ 
+         // Age history table for fresh search.
+         self.history.age();
+@@ -377,6 +391,7 @@ impl SearchEngine {
+ 
+         // Store root move restriction (UCI searchmoves).
+         self.root_moves = limits.root_moves.clone();
++        self.info_sink = limits.info_sink.clone();
+ 
+         // Age history table for fresh search.
+         self.history.age();
+@@ -456,6 +471,12 @@ impl SearchEngine {
+                 self.extract_pv(&mut board, depth)
+             };
+             result.stats = self.stats.clone();
++            result.stats.hashfull = self.tt_hashfull();
++
++            // Stream the finished iteration to the GUI while the search is still running.
++            if let Some(sink) = &self.info_sink {
++                sink.emit(&result);
++            }
+         }
+ 
+         // Out of time before even depth 1 produced a move (tiny clock, or a
+diff --git a/src/search/smp.rs b/src/search/smp.rs
+index 27d9607..da485e2 100644
+--- a/src/search/smp.rs
++++ b/src/search/smp.rs
+@@ -66,7 +66,12 @@ pub fn parallel_search(
+     let mut handles = Vec::with_capacity(num_threads);
+     for thread_id in 0..num_threads {
+         let board = board.clone();
+-        let limits = limits.clone();
++        let mut limits = limits.clone();
++        // Only worker 0 reports iterations; helpers search at staggered depths and would
++        // interleave misleading lines.
++        if thread_id != 0 {
++            limits.info_sink = None;
++        }
+         let shared = Arc::clone(shared);
+         // Stagger starting depths for diversity (worker i starts at
+         // depth 1+i, clamped to the depth cap inside the engine).
+diff --git a/src/search/time_manager.rs b/src/search/time_manager.rs
+index 58f18db..00f8e3c 100644
+--- a/src/search/time_manager.rs
++++ b/src/search/time_manager.rs
+@@ -16,6 +16,28 @@ use std::time::{Duration, Instant};
+ 
+ use crate::board::Move;
+ 
++use super::SearchResult;
++
++/// Receives the result of every completed iterative-deepening iteration (UCI `info` stream).
++#[derive(Clone)]
++pub struct InfoSink(Arc<dyn Fn(&SearchResult) + Send + Sync>);
++
++impl InfoSink {
++    pub fn new(f: impl Fn(&SearchResult) + Send + Sync + 'static) -> Self {
++        Self(Arc::new(f))
++    }
++
++    pub fn emit(&self, result: &SearchResult) {
++        (self.0)(result)
++    }
++}
++
++impl std::fmt::Debug for InfoSink {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        f.write_str("InfoSink")
++    }
++}
++
+ /// Default number of moves to assume remaining in sudden death.
+ const DEFAULT_MOVES_TO_GO: u32 = 30;
+ 
+@@ -65,6 +87,11 @@ pub struct SearchLimits {
+     /// Shared stop flag allowing another thread to halt the search
+     /// (UCI `stop` command, optional).
+     pub stop_signal: Option<Arc<AtomicBool>>,
++    /// Time reserved for GUI and communication latency, taken off the budget (UCI
++    /// `Move Overhead`). Applies to `movetime` and game-clock searches.
++    pub overhead_ms: u64,
++    /// Called after every completed iteration, for streaming `info` lines (optional).
++    pub info_sink: Option<InfoSink>,
+ }
+ 
+ impl SearchLimits {
+@@ -76,6 +103,8 @@ impl SearchLimits {
+             max_nodes: None,
+             root_moves: None,
+             stop_signal: None,
++            overhead_ms: 0,
++            info_sink: None,
+         }
+     }
+ 
+@@ -87,6 +116,8 @@ impl SearchLimits {
+             max_nodes: None,
+             root_moves: None,
+             stop_signal: None,
++            overhead_ms: 0,
++            info_sink: None,
+         }
+     }
+ 
+@@ -98,6 +129,8 @@ impl SearchLimits {
+             max_nodes: None,
+             root_moves: None,
+             stop_signal: None,
++            overhead_ms: 0,
++            info_sink: None,
+         }
+     }
+ 
+@@ -113,6 +146,8 @@ impl SearchLimits {
+             max_nodes: None,
+             root_moves: None,
+             stop_signal: None,
++            overhead_ms: 0,
++            info_sink: None,
+         }
+     }
+ 
+@@ -134,6 +169,18 @@ impl SearchLimits {
+         self
+     }
+ 
++    /// Reserve `ms` milliseconds for communication latency.
++    pub fn with_overhead(mut self, ms: u64) -> Self {
++        self.overhead_ms = ms;
++        self
++    }
++
++    /// Report every completed iteration to `sink`.
++    pub fn with_info_sink(mut self, sink: InfoSink) -> Self {
++        self.info_sink = Some(sink);
++        self
++    }
++
+     /// Install a shared stop flag checked by the search.
+     pub fn with_stop_signal(mut self, signal: Arc<AtomicBool>) -> Self {
+         self.stop_signal = Some(signal);
+@@ -174,14 +221,17 @@ pub struct TimeManager {
+ impl TimeManager {
+     /// Create a new time manager with the given limits.
+     pub fn new(limits: &SearchLimits) -> Self {
++        let overhead = Duration::from_millis(limits.overhead_ms);
+         let (soft_limit, hard_limit, use_time_limit) = match &limits.time_control {
+             TimeControl::FixedDepth(_) => {
+                 // No time limit for fixed depth.
+                 (Duration::MAX, Duration::MAX, false)
+             }
+             TimeControl::FixedTime(duration) => {
+-                // Soft limit is a fraction of the specified time.
+-                let hard = *duration;
++                // Soft limit is a fraction of the specified time, after the reserve.
++                let hard = duration
++                    .saturating_sub(overhead)
++                    .max(Duration::from_millis(MIN_TIME_MS));
+                 let soft_ms = (hard.as_millis() as f64 * SOFT_LIMIT_FRACTION) as u64;
+                 let soft = Duration::from_millis(soft_ms.max(MIN_TIME_MS));
+                 (soft, hard, true)
+@@ -191,7 +241,8 @@ impl TimeManager {
+                 increment,
+                 moves_to_go,
+             } => {
+-                let (soft, hard) = Self::calculate_time_budget(*remaining, *increment, *moves_to_go);
++                let usable = remaining.saturating_sub(overhead);
++                let (soft, hard) = Self::calculate_time_budget(usable, *increment, *moves_to_go);
+                 (soft, hard, true)
+             }
+             TimeControl::Infinite => {
+@@ -679,4 +730,32 @@ mod tests {
+         assert!(tm.soft_limit().as_millis() >= MIN_TIME_MS as u128);
+         assert!(tm.hard_limit().as_millis() >= MIN_TIME_MS as u128);
+     }
++
++    #[test]
++    fn overhead_is_taken_off_a_fixed_time_budget() {
++        let tm = TimeManager::new(&SearchLimits::movetime(100).with_overhead(30));
++        assert_eq!(tm.hard_limit, Duration::from_millis(70));
++    }
++
++    #[test]
++    fn overhead_larger_than_the_budget_still_leaves_one_millisecond() {
++        let tm = TimeManager::new(&SearchLimits::movetime(20).with_overhead(5_000));
++        assert_eq!(tm.hard_limit, Duration::from_millis(MIN_TIME_MS));
++    }
++
++    #[test]
++    fn overhead_shrinks_a_game_clock_budget() {
++        let plain = TimeManager::new(&SearchLimits::game_clock(10_000, 0, None));
++        let reserved = TimeManager::new(&SearchLimits::game_clock(10_000, 0, None).with_overhead(1_000));
++        let (_, expected_hard) =
++            TimeManager::calculate_time_budget(Duration::from_millis(9_000), Duration::ZERO, None);
++        assert_eq!(reserved.hard_limit, expected_hard);
++        assert!(reserved.hard_limit < plain.hard_limit);
++    }
++
++    #[test]
++    fn no_overhead_changes_nothing() {
++        let tm = TimeManager::new(&SearchLimits::movetime(100));
++        assert_eq!(tm.hard_limit, Duration::from_millis(100));
++    }
+ }
+diff --git a/src/uci/handler.rs b/src/uci/handler.rs
+index 7921c14..9126574 100644
+--- a/src/uci/handler.rs
++++ b/src/uci/handler.rs
+@@ -6,13 +6,16 @@
+ //! stdin take effect while a search is in progress. A shared atomic flag
+ //! (see [`SearchLimits::with_stop_signal`]) halts the worker promptly.
+ 
+-use crate::board::Board;
+-use crate::search::{parallel_search, SearchEngine, SearchLimits, SearchResult, SharedTT, MAX_DEPTH};
++use crate::board::{Board, Move, MoveType};
++use crate::book::BookManager;
++use crate::search::{
++    parallel_search, InfoSink, SearchEngine, SearchLimits, SearchResult, SharedTT, MAX_DEPTH,
++};
+ use crate::types::Color;
+ 
+ use super::protocol::{
+-    clamp_hash_mb, format_bestmove, format_info, format_uci_id, parse_command, parse_uci_move,
+-    GoParams, UciCommand, HASH_DEFAULT_MB,
++    clamp_hash_mb, clamp_overhead_ms, format_bestmove, format_info, format_uci_id, parse_command, parse_uci_move,
++    GoParams, UciCommand, HASH_DEFAULT_MB, OVERHEAD_DEFAULT_MS,
+ };
+ 
+ use std::io::{self, BufRead, Write};
+@@ -56,6 +59,11 @@ pub struct UciEngine {
+     shared_tt: Option<Arc<SharedTT>>,
+     /// Current `Hash` option value in MB.
+     hash_mb: usize,
++    /// Polyglot opening book (`BookFile`), consulted when `OwnBook` is on.
++    book: BookManager,
++    own_book: bool,
++    /// `Move Overhead` option: milliseconds per move reserved for GUI latency.
++    move_overhead_ms: u64,
+ }
+ 
+ impl UciEngine {
+@@ -73,6 +81,9 @@ impl UciEngine {
+             num_threads: 1,
+             shared_tt: None,
+             hash_mb: HASH_DEFAULT_MB,
++            book: BookManager::new(),
++            own_book: false,
++            move_overhead_ms: OVERHEAD_DEFAULT_MS,
+         }
+     }
+ 
+@@ -172,13 +183,13 @@ impl UciEngine {
+             UciCommand::Uci => self.handle_uci(stdout),
+             UciCommand::Debug(on) => self.debug = on,
+             UciCommand::IsReady => self.handle_isready(stdout),
+-            UciCommand::SetOption { name, value } => self.handle_setoption(&name, value),
++            UciCommand::SetOption { name, value } => self.handle_setoption(&name, value, stdout),
+             UciCommand::Register => {} // Not implemented.
+             UciCommand::UciNewGame => self.handle_ucinewgame(),
+             UciCommand::Position { fen, moves } => {
+                 self.handle_position(fen.as_deref(), &moves, stdout)
+             }
+-            UciCommand::Go(params) => self.handle_go(params),
++            UciCommand::Go(params) => self.handle_go(params, stdout),
+             UciCommand::Stop => self.handle_stop(stdout),
+             UciCommand::PonderHit => {} // Not implemented.
+             UciCommand::Quit => return false,
+@@ -249,7 +260,7 @@ impl UciEngine {
+     }
+ 
+     /// Handle "setoption" command.
+-    fn handle_setoption(&mut self, name: &str, value: Option<String>) {
++    fn handle_setoption(&mut self, name: &str, value: Option<String>, stdout: &mut io::Stdout) {
+         match name.to_lowercase().as_str() {
+             "hash" => {
+                 if let Some(v) = value {
+@@ -267,6 +278,39 @@ impl UciEngine {
+                     }
+                 }
+             }
++            "move overhead" => {
++                if let Some(Ok(ms)) = value.map(|v| v.trim().parse::<u64>()) {
++                    self.move_overhead_ms = clamp_overhead_ms(ms);
++                }
++            }
++            "clear hash" => {
++                let mut engine = self.take_engine();
++                engine.clear_hash();
++                self.engine = Some(engine);
++                if let Some(tt) = &self.shared_tt {
++                    tt.clear();
++                }
++            }
++            "ownbook" => {
++                if let Some(v) = value {
++                    self.own_book = v.trim().eq_ignore_ascii_case("true");
++                }
++            }
++            "bookfile" => {
++                // UCI sends "<empty>" (or nothing) to clear a string option.
++                let path = value.unwrap_or_default();
++                let path = path.trim();
++                if path.is_empty() || path == "<empty>" {
++                    self.book = BookManager::new();
++                } else {
++                    let mut book = BookManager::new();
++                    match book.load(path) {
++                        Ok(()) if book.is_loaded() => self.book = book,
++                        Ok(()) => self.report_error(stdout, &format!("book '{}' has no entries", path)),
++                        Err(e) => self.report_error(stdout, &format!("cannot load book '{}': {}", path, e)),
++                    }
++                }
++            }
+             "threads" => {
+                 if let Some(v) = value {
+                     if let Ok(n) = v.parse::<usize>() {
+@@ -340,6 +384,26 @@ impl UciEngine {
+         self.board = board;
+     }
+ 
++    /// The book's choice for the current position, as a legal move of that position.
++    ///
++    /// Book files come from outside, so the decoded move is only used to pick among the
++    /// engine's own legal moves (matched on squares and promotion). An entry that is not
++    /// legal here is ignored and the engine searches instead.
++    fn book_move(&self) -> Option<Move> {
++        if !self.book.is_loaded() {
++            return None;
++        }
++        let wanted = self.book.probe(&self.board)?;
++        let promotion = |m: &Move| match m.move_type {
++            MoveType::Promotion(p) => Some(p),
++            _ => None,
++        };
++        self.board
++            .generate_legal_moves()
++            .into_iter()
++            .find(|m| m.from == wanted.from && m.to == wanted.to && promotion(m) == promotion(&wanted))
++    }
++
+     /// Report a recoverable protocol problem to the GUI.
+     fn report_error(&self, stdout: &mut io::Stdout, msg: &str) {
+         let _ = writeln!(stdout, "info string error: {}", msg);
+@@ -347,12 +411,39 @@ impl UciEngine {
+     }
+ 
+     /// Handle "go" command: start a search on the worker thread.
+-    fn handle_go(&mut self, params: GoParams) {
++    fn handle_go(&mut self, params: GoParams, stdout: &mut io::Stdout) {
+         // Only one search at a time; stop (and discard) any active one.
+         self.stop_search();
+ 
++        // A book move needs no search. Analysis requests (infinite, ponder, fixed depth or
++        // nodes, mate search, searchmoves) are left to the engine.
++        let analysis = params.infinite
++            || params.ponder
++            || params.depth.is_some()
++            || params.nodes.is_some()
++            || params.mate.is_some()
++            || !params.searchmoves.is_empty();
++        if self.own_book && !analysis {
++            if let Some(mv) = self.book_move() {
++                let _ = writeln!(stdout, "info string book move");
++                self.write_bestmove(stdout, Some(mv));
++                return;
++            }
++        }
++
+         let stop = Arc::new(AtomicBool::new(false));
+-        let mut limits = self.go_params_to_limits(&params, Arc::clone(&stop));
++        let mut limits = self
++            .go_params_to_limits(&params, Arc::clone(&stop))
++            .with_overhead(self.move_overhead_ms);
++
++        // Stream every finished iteration to the GUI while the search is still running.
++        let started = Instant::now();
++        limits = limits.with_info_sink(InfoSink::new(move |result: &SearchResult| {
++            let line = format_info(result, started.elapsed().as_millis());
++            let mut out = io::stdout().lock();
++            let _ = writeln!(out, "{}", line);
++            let _ = out.flush();
++        }));
+ 
+         // Resolve UCI searchmoves strings to legal moves now; the engine
+         // enforces the restriction at the root.
+diff --git a/src/uci/protocol.rs b/src/uci/protocol.rs
+index 157928a..8ea23d5 100644
+--- a/src/uci/protocol.rs
++++ b/src/uci/protocol.rs
+@@ -11,6 +11,16 @@ pub const HASH_MIN_MB: usize = 1;
+ pub const HASH_MAX_MB: usize = 4096;
+ pub const HASH_DEFAULT_MB: usize = 64;
+ 
++/// Advertised `Move Overhead` option range, in milliseconds.
++pub const OVERHEAD_MIN_MS: u64 = 0;
++pub const OVERHEAD_MAX_MS: u64 = 5000;
++pub const OVERHEAD_DEFAULT_MS: u64 = 10;
++
++/// Clamp a requested `Move Overhead` to the advertised range.
++pub fn clamp_overhead_ms(requested: u64) -> u64 {
++    requested.clamp(OVERHEAD_MIN_MS, OVERHEAD_MAX_MS)
++}
++
+ /// Clamp a requested `Hash` size to the advertised range.
+ pub fn clamp_hash_mb(requested: usize) -> usize {
+     requested.clamp(HASH_MIN_MB, HASH_MAX_MB)
+@@ -295,6 +305,13 @@ pub fn format_uci_id() -> String {
+         HASH_DEFAULT_MB, HASH_MIN_MB, HASH_MAX_MB
+     ));
+     output.push_str("option name Threads type spin default 1 min 1 max 256\n");
++    output.push_str(&format!(
++        "option name Move Overhead type spin default {} min {} max {}\n",
++        OVERHEAD_DEFAULT_MS, OVERHEAD_MIN_MS, OVERHEAD_MAX_MS
++    ));
++    output.push_str("option name Clear Hash type button\n");
++    output.push_str("option name OwnBook type check default false\n");
++    output.push_str("option name BookFile type string default <empty>\n");
+     output.push_str("\n");
+     output.push_str("uciok");
+     output
+@@ -326,6 +343,7 @@ pub fn format_info(result: &SearchResult, elapsed_ms: u128) -> String {
+     // Nodes and NPS.
+     info.push_str(&format!(" nodes {}", result.stats.nodes));
+     info.push_str(&format!(" nps {}", result.stats.nps(elapsed_ms)));
++    info.push_str(&format!(" hashfull {}", result.stats.hashfull));
+     info.push_str(&format!(" time {}", elapsed_ms));
+ 
+     // Principal variation.
+@@ -465,6 +483,29 @@ mod tests {
+         }
+     }
+ 
++    #[test]
++    fn move_overhead_is_clamped_to_the_advertised_range() {
++        assert_eq!(clamp_overhead_ms(0), 0);
++        assert_eq!(clamp_overhead_ms(99_999), OVERHEAD_MAX_MS);
++        assert_eq!(clamp_overhead_ms(25), 25);
++    }
++
++    #[test]
++    fn the_uci_reply_advertises_overhead_and_clear_hash() {
++        let id = format_uci_id();
++        assert!(id.contains("option name Move Overhead type spin default 10 min 0 max 5000"), "{id}");
++        assert!(id.contains("option name Clear Hash type button"), "{id}");
++    }
++
++    #[test]
++    fn info_lines_carry_hashfull() {
++        let mut result = crate::search::SearchResult::default();
++        result.depth = 5;
++        result.stats.hashfull = 123;
++        let line = format_info(&result, 50);
++        assert!(line.contains(" hashfull 123 time 50"), "{line}");
++    }
++
+     #[test]
+     fn hash_is_clamped_to_the_advertised_range() {
+         assert_eq!(clamp_hash_mb(0), HASH_MIN_MB);
+diff --git a/tests/uci.rs b/tests/uci.rs
+index 63ffca1..97a944e 100644
+--- a/tests/uci.rs
++++ b/tests/uci.rs
+@@ -10,6 +10,11 @@ use std::time::{Duration, Instant};
+ /// Feed `script` to a fresh engine and collect stdout until `bestmoves` "bestmove" lines
+ /// have been seen (or 20 s pass), then quit it. Returns all output lines.
+ fn run(script: &str, bestmoves: usize) -> Vec<String> {
++    run_until(script, "bestmove", bestmoves)
++}
++
++/// Like [`run`], but waits for `count` lines starting with `marker` (e.g. "uciok").
++fn run_until(script: &str, marker: &str, count: usize) -> Vec<String> {
+     let mut child = Command::new(env!("CARGO_BIN_EXE_lemonate"))
+         .stdin(Stdio::piped())
+         .stdout(Stdio::piped())
+@@ -34,11 +39,11 @@ fn run(script: &str, bestmoves: usize) -> Vec<String> {
+     let mut lines = Vec::new();
+     let mut seen = 0;
+     let deadline = Instant::now() + Duration::from_secs(20);
+-    while seen < bestmoves {
++    while seen < count {
+         let left = deadline.saturating_duration_since(Instant::now());
+         match rx.recv_timeout(left) {
+             Ok(l) => {
+-                if l.starts_with("bestmove") {
++                if l.starts_with(marker) {
+                     seen += 1;
+                 }
+                 lines.push(l);
+@@ -133,3 +138,211 @@ fn single_thread_default_does_not_need_a_shared_table() {
+     let out = run("setoption name Threads value 2\nposition startpos\ngo depth 4\n", 1);
+     assert_ne!(bestmove(&out).expect("bestmove"), "0000");
+ }
++
++// ---- opening book (OwnBook / BookFile) ----
++
++/// Write a minimal Polyglot book (16-byte big-endian entries, sorted by key) and return its path.
++fn temp_book(name: &str, entries: &[(u64, u16, u16)]) -> String {
++    let mut sorted = entries.to_vec();
++    sorted.sort_by_key(|e| e.0);
++    let mut bytes = Vec::new();
++    for (key, raw_move, weight) in sorted {
++        bytes.extend_from_slice(&key.to_be_bytes());
++        bytes.extend_from_slice(&raw_move.to_be_bytes());
++        bytes.extend_from_slice(&weight.to_be_bytes());
++        bytes.extend_from_slice(&0u32.to_be_bytes());
++    }
++    let path = std::env::temp_dir().join(format!("lemonate-test-{}-{}.bin", name, std::process::id()));
++    std::fs::write(&path, bytes).unwrap();
++    path.to_string_lossy().into_owned()
++}
++
++/// Polyglot move word: to file, to rank, from file, from rank (no promotion).
++fn raw_move(from: (u16, u16), to: (u16, u16)) -> u16 {
++    to.0 | (to.1 << 3) | (from.0 << 6) | (from.1 << 9)
++}
++
++fn start_key() -> u64 {
++    lemonate::book::polyglot_hash(&lemonate::Board::starting_position())
++}
++
++fn start_book(name: &str) -> String {
++    // 1.e4 (weight 10) and 1.d4 (weight 5) from the start position.
++    temp_book(
++        name,
++        &[
++            (start_key(), raw_move((4, 1), (4, 3)), 10),
++            (start_key(), raw_move((3, 1), (3, 3)), 5),
++        ],
++    )
++}
++
++fn searched(lines: &[String]) -> bool {
++    lines.iter().any(|l| l.starts_with("info depth"))
++}
++
++#[test]
++fn own_book_plays_a_book_move_without_searching() {
++    let book = start_book("plays");
++    let out = run(
++        &format!("setoption name BookFile value {book}\nsetoption name OwnBook value true\nposition startpos\ngo wtime 60000 btime 60000\n"),
++        1,
++    );
++    let mv = bestmove(&out).expect("bestmove");
++    assert!(mv == "e2e4" || mv == "d2d4", "not a book move: {mv}");
++    assert!(out.iter().any(|l| l == "info string book move"), "{out:?}");
++    assert!(!searched(&out), "a book move must not start a search: {out:?}");
++}
++
++#[test]
++fn own_book_is_off_by_default() {
++    let book = start_book("off");
++    let out = run(
++        &format!("setoption name BookFile value {book}\nposition startpos\ngo depth 3\n"),
++        1,
++    );
++    assert!(searched(&out));
++    let out = run(
++        &format!("setoption name BookFile value {book}\nposition startpos\ngo wtime 2000 btime 2000\n"),
++        1,
++    );
++    assert!(searched(&out), "OwnBook was never enabled: {out:?}");
++}
++
++#[test]
++fn analysis_requests_bypass_the_book() {
++    let book = start_book("analysis");
++    for go in ["go depth 3", "go nodes 2000", "go infinite\nstop"] {
++        let out = run(
++            &format!("setoption name BookFile value {book}\nsetoption name OwnBook value true\nposition startpos\n{go}\n"),
++            1,
++        );
++        assert!(searched(&out), "'{go}' must search, got {out:?}");
++    }
++}
++
++#[test]
++fn out_of_book_positions_fall_back_to_search() {
++    let book = start_book("out");
++    let out = run(
++        &format!("setoption name BookFile value {book}\nsetoption name OwnBook value true\nposition startpos moves e2e4 e7e5\ngo wtime 2000 btime 2000\n"),
++        1,
++    );
++    assert!(searched(&out), "{out:?}");
++    assert_ne!(bestmove(&out), Some("0000"));
++}
++
++#[test]
++fn an_illegal_book_entry_is_ignored() {
++    // a1a8 is not a legal first move; the engine must search instead of playing it.
++    let book = temp_book("illegal", &[(start_key(), raw_move((0, 0), (0, 7)), 100)]);
++    let out = run(
++        &format!("setoption name BookFile value {book}\nsetoption name OwnBook value true\nposition startpos\ngo wtime 2000 btime 2000\n"),
++        1,
++    );
++    assert!(searched(&out), "{out:?}");
++    assert_ne!(bestmove(&out), Some("a1a8"));
++}
++
++#[test]
++fn a_missing_book_file_is_reported_and_play_continues() {
++    let out = run(
++        "setoption name BookFile value /nonexistent/book.bin\nsetoption name OwnBook value true\nposition startpos\ngo depth 2\n",
++        1,
++    );
++    assert!(out.iter().any(|l| l.starts_with("info string error")), "{out:?}");
++    assert!(searched(&out));
++}
++
++#[test]
++fn the_book_options_are_advertised() {
++    let out = run_until("uci\n", "uciok", 1);
++    assert!(out.iter().any(|l| l == "option name OwnBook type check default false"), "{out:?}");
++    assert!(out.iter().any(|l| l == "option name BookFile type string default <empty>"), "{out:?}");
++}
++
++// ---- Move Overhead, Clear Hash, streamed info ----
++
++fn info_depths(lines: &[String]) -> Vec<u32> {
++    lines
++        .iter()
++        .filter(|l| l.starts_with("info depth"))
++        .filter_map(|l| l.split_whitespace().nth(2)?.parse().ok())
++        .collect()
++}
++
++fn info_field(line: &str, key: &str) -> Option<u64> {
++    let mut it = line.split_whitespace();
++    while let Some(t) = it.next() {
++        if t == key {
++            return it.next()?.parse().ok();
++        }
++    }
++    None
++}
++
++#[test]
++fn info_lines_stream_while_the_search_is_still_running() {
++    // `go infinite` never ends by itself, so three info lines before any bestmove prove they
++    // are sent per iteration, not once at the end.
++    let out = run_until("position startpos\ngo infinite\n", "info depth", 3);
++    let depths = info_depths(&out);
++    assert!(depths.len() >= 3, "{out:?}");
++    assert!(depths.windows(2).all(|w| w[0] <= w[1]), "depths should not go backwards: {depths:?}");
++    assert!(!out.iter().any(|l| l.starts_with("bestmove")), "{out:?}");
++}
++
++#[test]
++fn a_fixed_depth_search_reports_every_depth_and_the_hash_fill() {
++    let out = run("position startpos\ngo depth 6\n", 1);
++    let depths = info_depths(&out);
++    for d in 1..=6 {
++        assert!(depths.contains(&d), "missing depth {d} in {depths:?}");
++    }
++    assert!(
++        out.iter().filter(|l| l.starts_with("info depth")).all(|l| info_field(l, "hashfull").is_some()),
++        "{out:?}"
++    );
++}
++
++#[test]
++fn a_huge_move_overhead_still_answers_with_a_move() {
++    let out = run("setoption name Move Overhead value 5000\nposition startpos\ngo movetime 200\n", 1);
++    assert_ne!(bestmove(&out).expect("bestmove"), "0000");
++}
++
++#[test]
++fn move_overhead_is_taken_off_the_search_time() {
++    // 300 ms of movetime with 250 ms reserved leaves about 50 ms; without the reserve the
++    // search runs for most of the 300 ms.
++    let reserved = run("setoption name Move Overhead value 250\nposition startpos\ngo movetime 300\n", 1);
++    let free = run("setoption name Move Overhead value 0\nposition startpos\ngo movetime 300\n", 1);
++    let time = |lines: &[String]| {
++        lines
++            .iter()
++            .filter(|l| l.starts_with("info depth"))
++            .filter_map(|l| info_field(l, "time"))
++            .max()
++            .expect("an info line with a time")
++    };
++    assert!(time(&reserved) < 150, "reserved: {}", time(&reserved));
++    assert!(time(&free) > 150, "free: {}", time(&free));
++}
++
++#[test]
++fn clear_hash_is_accepted_and_play_continues() {
++    // Options arrive while the engine is idle, so clear between a finished search and the next.
++    let out = run(
++        "position startpos\nsetoption name Clear Hash\nsetoption name Threads value 2\nsetoption name Clear Hash\ngo depth 4\n",
++        1,
++    );
++    assert!(!out.iter().any(|l| l.starts_with("info string error")), "{out:?}");
++    assert_ne!(bestmove(&out).expect("bestmove"), "0000");
++}
++
++#[test]
++fn the_new_options_are_advertised() {
++    let out = run_until("uci\n", "uciok", 1);
++    assert!(out.iter().any(|l| l == "option name Move Overhead type spin default 10 min 0 max 5000"), "{out:?}");
++    assert!(out.iter().any(|l| l == "option name Clear Hash type button"), "{out:?}");
++}

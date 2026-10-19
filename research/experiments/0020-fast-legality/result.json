@@ -1,0 +1,24 @@
+{
+  "baseline_commit": "9359b37be78e238ea124bd0170a23d27ccb40458",
+  "candidate_commit": "226ba27a893c8d7b02203abc61454846a0e8f574",
+  "config_hash": "bench-sprt",
+  "gate": {
+    "preflight": "skipped",
+    "build": "pass",
+    "test": "pass",
+    "perft": "pass",
+    "sprt": "pass"
+  },
+  "sprt": {
+    "games": 923,
+    "wins": 383,
+    "losses": 240,
+    "draws": 300,
+    "elo": 54.3,
+    "elo_err": 18.5,
+    "llr": 2.95,
+    "verdict": "H1"
+  },
+  "status": "accepted",
+  "reason": "SPRT [0, 5] via bench/sprt.py on the local runner; identical search tree, 1.38x faster"
+}

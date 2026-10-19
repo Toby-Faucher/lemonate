@@ -1,0 +1,76 @@
+diff --git a/src/search/move_ordering.rs b/src/search/move_ordering.rs
+index 4b3cdae..a8f1425 100644
+--- a/src/search/move_ordering.rs
++++ b/src/search/move_ordering.rs
+@@ -301,11 +301,12 @@ fn get_attackers(board: &Board, square: Square, by_color: Color, occupied: u64)
+ /// Get the least valuable attacker from a set of attackers.
+ ///
+ /// Returns the piece type and clears it from the attackers bitboard.
++/// The cheapest attacker in `attackers`, as its piece type and the single bit that is that piece.
+ fn get_least_valuable_attacker(
+     board: &Board,
+-    attackers: &mut u64,
++    attackers: u64,
+     color: Color,
+-) -> Option<PieceType> {
++) -> Option<(PieceType, u64)> {
+     // Check pieces in order of value (least to most).
+     for piece_type in [
+         PieceType::Pawn,
+@@ -316,12 +317,10 @@ fn get_least_valuable_attacker(
+         PieceType::King,
+     ] {
+         let pieces = board.piece_bitboard(color, piece_type).0;
+-        let overlap = *attackers & pieces;
++        let overlap = attackers & pieces;
+         if overlap != 0 {
+-            // Remove the least significant bit (one attacker).
+-            let lsb = overlap & overlap.wrapping_neg();
+-            *attackers &= !lsb;
+-            return Some(piece_type);
++            // One attacker of this type: the lowest set bit of *its* bitboard.
++            return Some((piece_type, overlap & overlap.wrapping_neg()));
+         }
+     }
+     None
+@@ -386,14 +385,13 @@ pub fn see(board: &Board, mv: &Move) -> i32 {
+         }
+ 
+         // Find the least valuable attacker.
+-        let mut temp_attackers = side_attackers;
+-        let next_attacker = get_least_valuable_attacker(board, &mut temp_attackers, side_to_move);
++        let next_attacker = get_least_valuable_attacker(board, side_attackers, side_to_move);
+ 
+         match next_attacker {
+-            Some(piece) => {
+-                // Remove this attacker from occupied and attackers.
+-                let lsb = side_attackers & side_attackers.wrapping_neg();
+-                occupied &= !lsb;
++            Some((piece, bit)) => {
++                // Remove this attacker (and not just the lowest-numbered one, which may be a
++                // more valuable piece) from occupied and attackers.
++                occupied &= !bit;
+                 attackers &= occupied;
+ 
+                 // Add any x-ray attackers that are now revealed.
+@@ -450,6 +448,20 @@ pub fn order_captures_into(captures: &[Move], buf: &mut [ScoredMove; MAX_MOVES])
+ 
+ #[cfg(test)]
+ mod tests {
++    /// After a recapture the piece taken off the board must be the cheapest attacker that was
++    /// chosen, not whichever attacker has the lowest square number.
++    #[test]
++    fn least_valuable_attacker_returns_the_bit_of_the_piece_it_picked() {
++        // Black rook on a5 (square 32) and pawn on d6 (square 43) both attack e5.
++        let board = Board::from_fen("4k3/8/3p4/r3N3/8/8/8/4K3 b - - 0 1").unwrap();
++        let attackers = board.color_bitboard(Color::Black).0
++            & (board.piece_bitboard(Color::Black, PieceType::Rook).0
++                | board.piece_bitboard(Color::Black, PieceType::Pawn).0);
++        let (piece, bit) = get_least_valuable_attacker(&board, attackers, Color::Black).unwrap();
++        assert_eq!(piece, PieceType::Pawn);
++        assert_eq!(bit, 1u64 << 43);
++    }
++
+     use super::super::killer_moves::KillerMoveTable;
+     use super::*;
+     use crate::board::MoveType;

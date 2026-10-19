@@ -1,0 +1,64 @@
+diff --git a/src/search/mod.rs b/src/search/mod.rs
+index 222bd3e..57200e1 100644
+--- a/src/search/mod.rs
++++ b/src/search/mod.rs
+@@ -222,6 +222,9 @@ pub struct SearchEngine {
+     /// back to the last irreversible move. `path_root` is where the search proper starts.
+     path: Vec<u64>,
+     path_root: usize,
++    /// `after_null[ply]` is set by the parent when it reaches `ply` through a null move, and
++    /// consumed by the node itself, which then may not try a null move of its own.
++    after_null: [bool; PV_SIZE],
+ }
+ 
+ impl SearchEngine {
+@@ -242,6 +245,7 @@ impl SearchEngine {
+             move_buffers: Vec::new(),
+             path: Vec::new(),
+             path_root: 0,
++            after_null: [false; PV_SIZE],
+         }
+     }
+ 
+@@ -570,6 +574,8 @@ impl SearchEngine {
+         if (ply as usize) < PV_SIZE {
+             self.pv_len[ply as usize] = 0;
+         }
++        // Two null moves in a row hand the move back and forth: the second one proves nothing.
++        let after_null = (ply as usize) < PV_SIZE && std::mem::take(&mut self.after_null[ply as usize]);
+ 
+         // Update selective depth.
+         if ply > self.stats.seldepth {
+@@ -691,6 +697,7 @@ impl SearchEngine {
+             && !in_check
+             && depth >= NULL_MOVE_MIN_DEPTH
+             && static_eval >= beta
++            && !after_null
+             && self.can_null_move(board, ply)
+         {
+             if let Some(score) = self.null_move_prune(board, depth, beta, ply) {
+@@ -1071,6 +1078,9 @@ impl SearchEngine {
+         let leaving = board.position_hash();
+         board.make_null_move();
+         self.path.push(leaving);
++        if ((ply + 1) as usize) < PV_SIZE {
++            self.after_null[(ply + 1) as usize] = true;
++        }
+ 
+         // Search with reduced depth.
+         let reduction = NULL_MOVE_REDUCTION + depth / 6;
+@@ -1739,4 +1749,14 @@ mod tests {
+         let mv = r.best_move.unwrap();
+         assert_eq!((mv.from.file(), mv.from.rank(), mv.to.file(), mv.to.rank()), (7, 0, 7, 1));
+     }
++
++    #[test]
++    fn null_move_flags_never_outlive_a_search() {
++        // Every flag a parent sets is consumed by the child that entered through the null move,
++        // so none may be left behind to suppress an unrelated node later.
++        let mut engine = SearchEngine::new();
++        let board = Board::from_fen("r1bq1rk1/pp1pppbp/2n2np1/2p5/2P5/2N2NP1/PP1PPPBP/R1BQ1RK1 w - - 0 1").unwrap();
++        engine.search(&board, SearchLimits::depth(7));
++        assert!(engine.after_null.iter().all(|&f| !f));
++    }
+ }

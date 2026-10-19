@@ -18,3 +18,18 @@ time of writing.
 - [x] 0012-iir: internal iterative reduction: reduce depth at nodes with no hash move **Result: inconclusive, +8.9 ± 7.4 Elo, 4000 games, LLR 2.29. Not merged.**
 - [ ] 0013-retune-mobility: re-run `src/bin/tuner` on a larger quiet-position dataset and adopt the new mobility weights
 - [x] 0014-stack-promising: stack the four unresolved small gains (0001 aspiration windows, 0003 null-move R=2, 0008 reverse futility, 0012 internal iterative reduction) on top of the merged LMR change (added after the backlog, at the owner's request). **Result: accepted, +29.5 ± 13.3 Elo, 1241 games, LLR 2.94. Merged.**
+- [x] 0015-pvs: principal variation search **Result: accepted, +102.1 ± 26.3 Elo, 504 games, LLR 2.95. Merged.**
+- [x] 0016-qs-tt: transposition table in quiescence **Result: accepted, +30.7 ± 13.5 Elo, 1715 games, LLR 2.96. Merged.**
+- [x] 0017-null-no-consecutive: no null move straight after a null move **Result: inconclusive, stopped by hand at 1025 games. Not merged.**
+- [x] 0018-null-eval-r: scale the null-move reduction by eval over beta **Result: inconclusive, about +1 Elo, stopped by hand at about 990 games. Not merged.**
+- [x] 0019-move-overhead: Move Overhead UCI option (see its result.json)
+- [x] 0020-fast-legality: skip make/unmake legality for non-pinned, non-king moves **Result: accepted, +54.3 ± 18.5 Elo, 923 games, LLR 2.95. Merged.**
+- [x] 0021-combined-main: rating check of main against 9359b37 **Result: +210.1 ± 41.8 Elo, 272 games.**
+- [x] 0022-late-move-pruning **Result: accepted, +56.3 ± 18.9 Elo, 928 games, LLR 2.96. Not merged yet; stacked in 0029.**
+- [x] 0023-see-pruning **Result: inconclusive, +11.6 ± 8.9 Elo, 4000 games, LLR 2.21. Not merged.**
+- [x] 0024-improving **Result: accepted, +16.5 ± 9.5 Elo, 3487 games, LLR 2.94. Not merged yet; stacked in 0029.**
+- [x] 0025-razoring **Result: inconclusive, +13.6 ± 9.0 Elo, 4000 games, LLR 2.64. Worth a re-run.**
+- [x] 0026-mate-distance **Result: inconclusive, -1.1 ± 8.9 Elo, 4000 games. Not merged.**
+- [ ] 0027-continuation-history: running at the time of writing, about -1 Elo after 2155 games
+- [x] 0028-see-attacker-fix: correctness fix **Result: inconclusive, -0.8 ± 8.9 Elo, 4000 games (no strength change expected). Not merged.**
+- [ ] 0029-lmp-improving-stack: 0022 and 0024 together against main

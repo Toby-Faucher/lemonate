@@ -1,0 +1,24 @@
+{
+  "baseline_commit": "8a0e1ed8f24699e456634824265b94981cb69722",
+  "candidate_commit": null,
+  "config_hash": "bench-sprt",
+  "gate": {
+    "preflight": "skipped",
+    "build": "pass",
+    "test": "pass",
+    "perft": "pass",
+    "sprt": "fail"
+  },
+  "sprt": {
+    "games": 990,
+    "wins": null,
+    "losses": null,
+    "draws": null,
+    "elo": 1,
+    "elo_err": null,
+    "llr": null,
+    "verdict": "inconclusive"
+  },
+  "status": "inconclusive",
+  "reason": "stopped by hand at about 990 games with about +1 Elo; the match record was removed when it was cancelled, so exact score and candidate commit were not kept"
+}
