@@ -4,6 +4,10 @@ A UCI chess engine written in Rust: bitboard move generation with magic bitboard
 alpha-beta search with the usual modern pruning, a tapered hand-written evaluation, and Lazy SMP.
 It speaks plain UCI, so any UCI GUI or `cutechess-cli` can drive it.
 
+**New to the code?** [`docs/GUIDE.md`](docs/GUIDE.md) is a guided tour in learning order, with
+exercises: bitboards, move generation, alpha-beta, the pruning techniques, evaluation, UCI, and
+how changes are measured.
+
 ## Build and run
 
 ```bash
