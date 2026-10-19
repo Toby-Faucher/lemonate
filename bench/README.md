@@ -31,8 +31,8 @@ bench/sprt.py record NAME ID                     # write research/experiments/ID
 ```
 
 Two machines can play matches, one match at a time each: `chess-test` (the container the gate uses)
-and the local machine, where cutechess runs in a small Debian container on threads 0-9 at low
-priority (the benchmark pins to cpu 14, so the two do not collide). `--runner auto`, the default,
+and the local machine, where cutechess runs in a small Debian container on the 16 performance-core threads (16 games at a time) at low
+priority. Do not run `bench.py` while a local match plays: it pins to cpu 14, one of those threads. `--runner auto`, the default,
 sends a match to whichever has fewer matches waiting or running; `--runner bawn|chess-test` forces
 one. The first local match fetches the cutechess binary and the opening book from `chess-test` and
 builds the runner image. Each result is fair on its own because both engines play on the same
