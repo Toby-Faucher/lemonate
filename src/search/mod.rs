@@ -94,6 +94,12 @@ pub const REVERSE_FUTILITY_MARGIN: i32 = 100;
 /// Maximum depth at which reverse futility pruning applies.
 pub const REVERSE_FUTILITY_MAX_DEPTH: i32 = 6;
 
+/// Late move pruning: deepest node at which late quiet moves are skipped outright.
+pub const LMP_MAX_DEPTH: i32 = 4;
+
+/// Late move pruning: quiet moves tried before the rest are skipped is `LMP_BASE + depth^2`.
+pub const LMP_BASE: usize = 3;
+
 /// Aspiration window initial size.
 pub const ASPIRATION_WINDOW: i32 = 50;
 
@@ -801,6 +807,21 @@ impl SearchEngine {
             // Never prune moves that give check: they are tactical even
             // though is_tactical() can't see that before the move is made.
             if can_futility_prune && move_count > 1 && !is_tactical && !board.is_in_check() {
+                board.undo_move(mv, undo);
+                continue;
+            }
+
+            // Late move pruning: at shallow depth the quiet moves late in the ordering
+            // almost never matter, so skip them (not when in check, giving check, or
+            // when every move so far has been losing to a mate).
+            if !is_pv
+                && !in_check
+                && depth <= LMP_MAX_DEPTH
+                && !is_tactical
+                && move_count > LMP_BASE + (depth * depth) as usize
+                && best_score > -(MATE_SCORE - MAX_DEPTH as i32)
+                && !board.is_in_check()
+            {
                 board.undo_move(mv, undo);
                 continue;
             }
