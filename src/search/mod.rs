@@ -243,8 +243,12 @@ pub struct SearchEngine {
 impl SearchEngine {
     /// Create a new search engine.
     pub fn new() -> Self {
+        Self::with_tt(TranspositionTable::default())
+    }
+
+    fn with_tt(tt: TranspositionTable) -> Self {
         Self {
-            tt: TranspositionTable::default(),
+            tt,
             shared: None,
             killers: KillerMoveTable::new(),
             history: HistoryTable::new(),
@@ -265,10 +269,8 @@ impl SearchEngine {
 
     /// Create a search engine with custom transposition table size.
     pub fn with_hash_size(size_mb: usize) -> Self {
-        Self {
-            tt: TranspositionTable::new(size_mb),
-            ..Self::new()
-        }
+        // Build the table once: `..Self::new()` would allocate (and drop) a default one.
+        Self::with_tt(TranspositionTable::new(size_mb))
     }
 
     /// Clear all search state for a new game.

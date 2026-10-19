@@ -285,6 +285,12 @@ impl UciEngine {
         let _ = stdout.flush();
     }
 
+    /// Size of the engine's private table: full for `Threads 1`, minimal when the
+    /// shared SMP table does the work (avoids holding the hash twice).
+    fn private_hash_mb(num_threads: usize, hash_mb: usize) -> usize {
+        if num_threads > 1 { 1 } else { hash_mb }
+    }
+
     /// Handle "setoption" command.
     fn handle_setoption(&mut self, name: &str, value: Option<String>, stdout: &mut io::Stdout) {
         match name.to_lowercase().as_str() {
@@ -295,7 +301,8 @@ impl UciEngine {
                         // would abort the process on allocation failure.
                         let size_mb = clamp_hash_mb(requested);
                         let mut engine = self.take_engine();
-                        engine.set_hash_size(size_mb);
+                        // SMP workers use the shared table; keep the private one tiny.
+                        engine.set_hash_size(Self::private_hash_mb(self.num_threads, size_mb));
                         self.engine = Some(engine);
                         self.hash_mb = size_mb;
                         // The shared table is rebuilt lazily at the new size
@@ -341,7 +348,17 @@ impl UciEngine {
                 if let Some(v) = value {
                     if let Ok(n) = v.parse::<usize>() {
                         self.abort_search();
+                        let was_smp = self.num_threads > 1;
                         self.num_threads = n.clamp(1, 256);
+                        // Single-threaded search uses the private table at full size;
+                        // SMP uses the shared one, so shrink the private one. Only
+                        // resize on a mode change (resizing clears the table).
+                        if was_smp != (self.num_threads > 1) {
+                            let mut engine = self.take_engine();
+                            engine
+                                .set_hash_size(Self::private_hash_mb(self.num_threads, self.hash_mb));
+                            self.engine = Some(engine);
+                        }
                         if self.num_threads == 1 {
                             self.shared_tt = None;
                         }
