@@ -35,7 +35,7 @@ mod transposition;
 
 pub use history::{CounterMoveTable, HistoryTable};
 pub use killer_moves::KillerMoveTable;
-pub use move_ordering::{is_good_capture, order_captures_into, MoveOrderer, ScoredMove, MAX_MOVES};
+pub use move_ordering::{is_good_capture, see, order_captures_into, MoveOrderer, ScoredMove, MAX_MOVES};
 pub use smp::{parallel_search, MAX_THREADS};
 pub use time_manager::{InfoSink, SearchLimits, TimeControl, TimeManager};
 pub use transposition::{EntryType, SharedTT, TranspositionEntry, TranspositionTable};
@@ -93,6 +93,12 @@ pub const REVERSE_FUTILITY_MARGIN: i32 = 100;
 
 /// Maximum depth at which reverse futility pruning applies.
 pub const REVERSE_FUTILITY_MAX_DEPTH: i32 = 6;
+
+/// SEE pruning: deepest node at which losing captures are skipped.
+pub const SEE_PRUNE_MAX_DEPTH: i32 = 5;
+
+/// SEE pruning: a capture is skipped when its exchange value is below `-SEE_PRUNE_MARGIN * depth`.
+pub const SEE_PRUNE_MARGIN: i32 = 75;
 
 /// Aspiration window initial size.
 pub const ASPIRATION_WINDOW: i32 = 50;
@@ -792,6 +798,19 @@ impl SearchEngine {
             move_count += 1;
             let is_capture = mv.captured.is_some();
             let is_tactical = self.is_tactical(&mv);
+
+            // SEE pruning: a capture that loses material by more than a depth-scaled margin
+            // is not worth searching in a non-PV node. The first move is always searched.
+            if !is_pv
+                && !in_check
+                && is_capture
+                && move_count > 1
+                && depth <= SEE_PRUNE_MAX_DEPTH
+                && best_score > -(MATE_SCORE - MAX_DEPTH as i32)
+                && see(board, &mv) < -SEE_PRUNE_MARGIN * depth
+            {
+                continue;
+            }
 
             // Make the move (unchecked: it comes from this position's
             // legal set, already validated during generation).
