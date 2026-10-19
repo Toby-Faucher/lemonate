@@ -19,17 +19,22 @@ def repo_url(root):
     return u[:-4] if u.endswith(".git") else u
 
 
-def build_payload(rows, metrics, points, records, anchor, config):
+def build_payload(rows, metrics, points, records, anchor, config, extra_rows=(), sprt=()):
     data = {}
+    point_rows = list(rows) + list(extra_rows)
     for key, (label, unit, lower) in metrics.items():
-        pts = points(rows, key)
-        data[key] = {"label": label, "unit": unit, "lower": lower, "points": pts, "records": records(pts, lower, key)}
+        pts = points(point_rows, key)
+        data[key] = {"label": label, "unit": unit, "lower": lower, "points": pts,
+                     "records": records(pts, lower, key),
+                     # Elo is an offset from nothing in particular: a 0-based axis would flatten it.
+                     "zero_based": unit != "Elo"}
     ok = [r for r in rows if r.get("status") == "ok"]
     env = ok[-1]["env"] if ok else {}
     statuses = {}
     for r in rows:
         statuses[r.get("status", "?")] = statuses.get(r.get("status", "?"), 0) + 1
     return {
+        "sprt": list(sprt),
         "metrics": data,
         "meta": {
             "generated": int(time.time()),
@@ -58,8 +63,8 @@ def to_fragment(html):
     return html
 
 
-def write(rows, out, metrics, points, records, anchor, config, fragment=False):
-    payload = build_payload(rows, metrics, points, records, anchor, config)
+def write(rows, out, metrics, points, records, anchor, config, fragment=False, extra_rows=(), sprt=()):
+    payload = build_payload(rows, metrics, points, records, anchor, config, extra_rows, sprt)
     blob = json.dumps(payload, separators=(",", ":")).replace("</", "<\\/")
     html = TEMPLATE.replace("/*__DATA__*/null", blob)
     Path(out).write_text(to_fragment(html) if fragment else html)
@@ -187,6 +192,9 @@ h2 { font-family: var(--display); font-size: 15px; text-transform: uppercase; le
   </div>
   <h2>Record holders</h2>
   <div class="card" style="overflow-x:auto"><table id="table"></table></div>
+  <h2>Confirmed head to head</h2>
+  <div class="card" style="overflow-x:auto"><table id="sprt"></table></div>
+  <div class="foot" id="sprtnote"></div>
   <div class="foot" id="foot"></div>
 </main>
 <script>
@@ -201,11 +209,15 @@ let timer = null, speed = 1;
 
 function fmtVal(v, m) {
   if (v == null) return "–";
+  if (m.unit === "Elo") return Math.round(v) + " Elo";
   if (m.unit === "ms") return v >= 1000 ? (v / 1000).toFixed(2) + " s" : Math.round(v) + " ms";
   if (m.unit === "nps") return v >= 1e6 ? (v / 1e6).toFixed(2) + "M nps" : Math.round(v / 1000) + "k nps";
   if (m.unit === "nodes") return v >= 1e6 ? (v / 1e6).toFixed(2) + "M" : Math.round(v / 1000) + "k";
   return String(v);
 }
+// How much a record beat the previous one by: a percentage for speeds, points for Elo.
+const gain = (r, m) => m.unit === "Elo" ? r.improvement_abs : r.improvement_pct;
+const gainText = (r, m, d) => (m.lower ? "−" : "+") + (m.unit === "Elo" ? Math.round(gain(r, m)) + " Elo" : gain(r, m).toFixed(d) + "%");
 const fmtDate = (ts) => new Date(ts * 1000).toISOString().slice(0, 10);
 const commitLink = (p) => DATA.meta.repo ? `<a href="${DATA.meta.repo}/commit/${p.commit}" target="_blank" rel="noopener">${p.short}</a>` : p.short;
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
@@ -242,14 +254,14 @@ function stats(m) {
   if (recs.length < 1) { s.innerHTML = ""; return; }
   const first = recs[0], cur = recs[recs.length - 1];
   const ratio = m.lower ? first.value / cur.value : cur.value / first.value;
-  let big = recs.filter((r) => r.improvement_pct != null).sort((a, b) => b.improvement_pct - a.improvement_pct)[0];
+  let big = recs.filter((r) => gain(r, m) != null).sort((a, b) => gain(b, m) - gain(a, m))[0];
   let long = recs.slice(0, -1).sort((a, b) => (b.held_days || 0) - (a.held_days || 0))[0];
   const card = (k, v, d) => `<div class="stat"><div class="k">${k}</div><div class="v mono">${v}</div><div class="d">${d || ""}</div></div>`;
   s.innerHTML =
     card("Current record", fmtVal(cur.value, m), `${commitLink(cur)} · ${fmtDate(cur.ts)}`) +
     card("Since the first measurement", ratio.toFixed(2) + "&times;", `${fmtVal(first.value, m)} &rarr; ${fmtVal(cur.value, m)}`) +
     card("Records broken", recs.length, `${m.points.length} versions measured`) +
-    (big ? card("Biggest single jump", (m.lower ? "&minus;" : "+") + big.improvement_pct.toFixed(1) + "%", esc(big.subject.slice(0, 44))) : "") +
+    (big ? card("Biggest single jump", gainText(big, m, 1), esc(big.subject.slice(0, 44))) : "") +
     (long ? card("Longest-standing record", Math.round(long.held_days) + " days", `${fmtVal(long.value, m)} · ${commitLink(long)}`) : "");
 }
 
@@ -259,6 +271,7 @@ function draw() {
   svg.innerHTML = "";
   stats(m);
   table(m);
+  sprtTable();
   const pts = m.points;
   if (!pts.length) {
     $("banner").classList.remove("on");
@@ -271,13 +284,15 @@ function draw() {
   let lo = Math.min(...vals), hi = Math.max(...vals);
   const logOk = useLog && lo > 0;
   const f = (v) => logOk ? Math.log10(v) : v;
-  let ylo = logOk ? f(lo) - 0.05 : 0, yhi = f(hi) + (logOk ? 0.05 : (hi - lo) * 0.06 + 1e-9);
+  const zero = m.zero_based !== false;
+  const base = zero ? 0 : Math.floor((lo - 60) / 100) * 100;
+  let ylo = logOk ? f(lo) - 0.05 : base, yhi = f(hi) + (logOk ? 0.05 : (hi - lo) * 0.06 + 1e-9);
   const X = (ts) => M.l + (ts - t0) / (t1 - t0 || 1) * (W - M.l - M.r);
   const Y = (v) => H - M.b - (f(v) - ylo) / (yhi - ylo || 1) * (H - M.t - M.b);
 
   // grid + axes
   const g = el("g", { class: "grid axis" }, svg);
-  const yt = logOk ? [] : niceTicks(0, hi, 5);
+  const yt = logOk ? [] : niceTicks(base, hi, 5);
   if (logOk) { for (let e = Math.floor(f(lo)); e <= Math.ceil(f(hi)); e++) for (const k of [1, 2, 5]) { const v = k * Math.pow(10, e); if (v >= lo * 0.9 && v <= hi * 1.1) yt.push(v); } }
   yt.forEach((v) => {
     el("line", { x1: M.l, x2: W - M.r, y1: Y(v), y2: Y(v) }, g);
@@ -329,10 +344,10 @@ function draw() {
       const c = el("circle", { cx: X(r.ts), cy: Y(r.value), r: 6.5, class: "rec-mark" }, svg);
       c.addEventListener("mousemove", (e) => showTip(e, r));
       c.addEventListener("mouseleave", () => (tip.style.display = "none"));
-      if (r.improvement_pct != null && r.improvement_pct >= 3) {
+      if (gain(r, m) != null && (m.unit === "Elo" ? gain(r, m) >= 20 : gain(r, m) >= 3)) {
         const up = m.lower;
         const tx = el("text", { x: X(r.ts), y: Y(r.value) + (up ? 22 : -14), "text-anchor": "middle", class: "rec-label" }, svg);
-        tx.textContent = (m.lower ? "−" : "+") + r.improvement_pct.toFixed(0) + "%";
+        tx.textContent = gainText(r, m, 0);
       }
     });
   }
@@ -346,7 +361,7 @@ function table(m) {
   if (!recs.length) { t.innerHTML = '<tr><td class="empty">No records yet.</td></tr>'; return; }
   let h = '<tr><th>#</th><th>Date</th><th>Commit</th><th class="num">Result</th><th class="num">Change</th><th class="num hide-sm">Held</th><th>What changed</th></tr>';
   recs.forEach((r, i) => {
-    const imp = r.improvement_pct == null ? "–" : `<span class="good">${m.lower ? "−" : "+"}${r.improvement_pct.toFixed(1)}%</span>`;
+    const imp = gain(r, m) == null ? "–" : `<span class="good">${gainText(r, m, 1)}</span>`;
     h += `<tr class="${r.current ? "current" : ""}"><td class="mono">${i + 1}</td><td class="mono">${fmtDate(r.ts)}</td><td class="mono">${commitLink(r)}</td>` +
       `<td class="num mono">${fmtVal(r.value, m)}</td><td class="num mono">${imp}</td>` +
       `<td class="num mono hide-sm">${r.current ? "now" : Math.round(r.held_days || 0) + " d"}</td><td>${esc(r.subject)}<div class="who">${esc(r.author)}</div></td></tr>`;
@@ -354,12 +369,28 @@ function table(m) {
   t.innerHTML = h;
 }
 
+function sprtTable() {
+  const t = $("sprt"), rows = DATA.sprt || [];
+  $("sprtnote").textContent = "Each row is one change played against the version just before it (SPRT, 95% error bars). " +
+    "This is the sharp test for small gains; the Elo tab above only shows the overall trend, with about \u00b140 Elo of error per version.";
+  if (!rows.length) { t.innerHTML = '<tr><td class="empty">No head-to-head results yet.</td></tr>'; return; }
+  let h = '<tr><th>Experiment</th><th>Commit</th><th class="num">Games</th><th class="num">Elo</th><th>Verdict</th></tr>';
+  rows.forEach((r) => {
+    const elo = r.elo == null ? "\u2013" : `${r.elo > 0 ? "+" : ""}${r.elo.toFixed(0)} \u00b1 ${r.elo_err.toFixed(0)}`;
+    const ok = r.verdict === "H1", cls = ok ? "good" : "";
+    const word = ok ? "better" : r.verdict === "H0" ? "no gain" : "inconclusive";
+    h += `<tr><td>${esc(r.name)}</td><td class="mono">${esc(r.baseline)} &rarr; ${esc(r.candidate)}</td><td class="num mono">${r.games}</td>` +
+      `<td class="num mono ${cls}">${elo}</td><td class="${cls}">${word}</td></tr>`;
+  });
+  t.innerHTML = h;
+}
+
 // ---- replay
 function banner(r, m, from) {
   const b = $("banner");
-  const imp = r.improvement_pct == null ? "First measurement" : `${fmtVal(r.previous, m)} &rarr; ${fmtVal(r.value, m)} &nbsp;(${m.lower ? "−" : "+"}${r.improvement_pct.toFixed(1)}%)`;
+  const imp = gain(r, m) == null ? "First measurement" : `${fmtVal(r.previous, m)} &rarr; ${fmtVal(r.value, m)} &nbsp;(${gainText(r, m, 1)})`;
   const heldPrev = (m.records[m.records.indexOf(r) - 1] || {}).held_days;
-  b.innerHTML = `<div class="box"><div class="nr">${r.improvement_pct == null ? "Baseline" : "New record"} #${m.records.indexOf(r) + 1}</div>` +
+  b.innerHTML = `<div class="box"><div class="nr">${gain(r, m) == null ? "Baseline" : "New record"} #${m.records.indexOf(r) + 1}</div>` +
     `<div class="big mono" id="bignum">${fmtVal(from, m)}</div><div class="delta mono">${imp}</div>` +
     `<div class="msg">${esc(r.subject)}</div><div class="who">${esc(r.author)} · ${commitLink(r)} · ${fmtDate(r.ts)}` +
     `${heldPrev != null ? " · previous record stood for " + Math.round(heldPrev) + " days" : ""}</div></div>`;
