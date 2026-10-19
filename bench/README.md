@@ -16,6 +16,26 @@ python3 bench/test_bench.py       # unit tests for the record logic
 
 Python 3 stdlib only. Needs `podman` and `taskset`.
 
+## Strength: SPRT matches on chess-test
+
+`bench/sprt.py` queues cutechess matches with the same settings as the research gate (they are
+read from `research/config.toml`), but lets several run back to back and be watched:
+
+```bash
+bench/sprt.py start 0015-pvs main exp/0015-pvs   # build both here, ship, queue (bounds from the config)
+bench/sprt.py start 0019-x main feat/x --elo0 -4 --elo1 1   # non-regression bounds
+bench/sprt.py status                             # one line per match: games, score, Elo, LLR, verdict
+bench/sprt.py wait NAME                          # block until it finishes
+bench/sprt.py cancel NAME
+bench/sprt.py record NAME ID                     # write research/experiments/ID/{result,sprt}.json + patch.diff
+```
+
+Engines are built in the pinned container with a portable target (`x86-64-v3`) and copied over, so
+nothing compiles on the match machine while a game is running. Matches queue on the same remote
+lock the gate uses, one at a time. `record` leaves `hypothesis.md` and `trace.md` to be written by
+hand; then `research/scripts/catalog.sh` regenerates `CATALOG.md`. Unlike `gate.sh`, this does not
+check the diff against the protected paths or run the local test stages, so run the tests yourself.
+
 ## What is measured
 
 | Metric | How | Why |
