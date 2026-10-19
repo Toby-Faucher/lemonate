@@ -78,7 +78,7 @@ mod tests {
         let output = format_weights(&tuned);
         assert!(output.contains("MG_PAWN_TABLE"));
         assert!(output.contains("QUEEN_MOBILITY_EG"));
-        assert_eq!(output.lines().count(), 38);
+        assert_eq!(output.lines().count(), 40);
     }
 
     #[test]

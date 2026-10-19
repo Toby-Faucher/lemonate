@@ -37,6 +37,10 @@ pub const QUEEN_MOBILITY_EG: [i32; 28] = [
     168, 168, 171, 182, 182, 192, 219,
 ];
 
+// Bishop pair: two or more bishops is worth a bonus, larger in the endgame.
+pub const BISHOP_PAIR_MG: i32 = 30;
+pub const BISHOP_PAIR_EG: i32 = 50;
+
 pub struct MobilityEval {
     phase: GamePhase,
 }
@@ -113,6 +117,10 @@ impl MobilityEval {
             self.evaluate_bishop_mobility_with_weights(board, color, friendly, blockers, weights);
         mg += bishop_mg;
         eg += bishop_eg;
+        if board.piece_bitboard(color, PieceType::Bishop).0.count_ones() >= 2 {
+            mg += weights.bishop_pair_mg;
+            eg += weights.bishop_pair_eg;
+        }
 
         let (rook_mg, rook_eg) =
             self.evaluate_rook_mobility_with_weights(board, color, friendly, blockers, weights);
