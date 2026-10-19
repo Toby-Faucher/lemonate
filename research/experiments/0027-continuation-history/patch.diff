@@ -1,0 +1,239 @@
+diff --git a/src/search/history.rs b/src/search/history.rs
+index e154e4b..29ca409 100644
+--- a/src/search/history.rs
++++ b/src/search/history.rs
+@@ -205,8 +205,85 @@ impl Default for CounterMoveTable {
+     }
+ }
+ 
++/// Number of (piece, destination) keys: 12 piece kinds x 64 squares.
++const CONT_KEYS: usize = 12 * 64;
++
++/// Marks "no previous move" (root, or just after a null move).
++pub const NO_PREV: u16 = u16::MAX;
++
++/// Key for a move in the continuation history: which piece went to which square.
++#[inline]
++pub fn cont_key(mv: &Move) -> u16 {
++    ((mv.piece.color as usize * 6 + mv.piece.piece_type as usize) * 64 + mv.to.index()) as u16
++}
++
++/// Continuation history: how well a quiet move has done right after a given earlier move.
++///
++/// Indexed [earlier move key][this move key]. The earlier move is the one played one or two
++/// plies before, so the table learns follow-ups ("after Nf3, Bg5 tends to be good") that the
++/// plain from/to history cannot see.
++pub struct ContinuationHistory {
++    table: Vec<i32>,
++}
++
++impl ContinuationHistory {
++    pub fn new() -> Self {
++        Self {
++            table: vec![0; CONT_KEYS * CONT_KEYS],
++        }
++    }
++
++    pub fn clear(&mut self) {
++        self.table.iter_mut().for_each(|v| *v = 0);
++    }
++
++    /// Halve every score (called at the start of a search, like the plain history).
++    pub fn age(&mut self) {
++        self.table.iter_mut().for_each(|v| *v /= 2);
++    }
++
++    #[inline]
++    pub fn get(&self, prev: u16, key: u16) -> i32 {
++        if prev == NO_PREV {
++            return 0;
++        }
++        self.table[prev as usize * CONT_KEYS + key as usize]
++    }
++
++    /// Move the score towards `bonus` with the same gravity as the plain history.
++    #[inline]
++    pub fn update(&mut self, prev: u16, key: u16, bonus: i32) {
++        if prev == NO_PREV {
++            return;
++        }
++        let slot = &mut self.table[prev as usize * CONT_KEYS + key as usize];
++        let new_score = *slot + bonus - (*slot * bonus.abs() / MAX_HISTORY_SCORE);
++        *slot = new_score.clamp(-MAX_HISTORY_SCORE, MAX_HISTORY_SCORE);
++    }
++}
++
++impl Default for ContinuationHistory {
++    fn default() -> Self {
++        Self::new()
++    }
++}
++
+ #[cfg(test)]
+ mod tests {
++    #[test]
++    fn continuation_history_learns_and_ignores_missing_previous_move() {
++        let mut c = ContinuationHistory::new();
++        assert_eq!(c.get(5, 9), 0);
++        c.update(5, 9, 100);
++        assert!(c.get(5, 9) > 0);
++        assert_eq!(c.get(5, 10), 0);
++        // No previous move: nothing to read or write.
++        c.update(NO_PREV, 9, 100);
++        assert_eq!(c.get(NO_PREV, 9), 0);
++        c.update(5, 9, -10_000_000);
++        assert!(c.get(5, 9) >= -MAX_HISTORY_SCORE);
++    }
++
+     use super::*;
+     use crate::board::MoveType;
+     use crate::types::{Piece, PieceType, Square};
+@@ -445,3 +522,4 @@ mod tests {
+         assert_eq!(table.get(&prev2), Some(counter2));
+     }
+ }
++
+diff --git a/src/search/mod.rs b/src/search/mod.rs
+index ed678a3..50ca024 100644
+--- a/src/search/mod.rs
++++ b/src/search/mod.rs
+@@ -34,6 +34,7 @@ mod time_manager;
+ mod transposition;
+ 
+ pub use history::{CounterMoveTable, HistoryTable};
++use history::{cont_key, ContinuationHistory, NO_PREV};
+ pub use killer_moves::KillerMoveTable;
+ pub use move_ordering::{is_good_capture, order_captures_into, MoveOrderer, ScoredMove, MAX_MOVES};
+ pub use smp::{parallel_search, MAX_THREADS};
+@@ -206,6 +207,10 @@ pub struct SearchEngine {
+     history: HistoryTable,
+     /// Counter move table.
+     counters: CounterMoveTable,
++    /// Continuation history: quiet move scores conditioned on the moves one and two plies back.
++    cont_history: ContinuationHistory,
++    /// Key of the move played at each ply of the current line (`NO_PREV` after a null move).
++    move_stack: [u16; PV_SIZE + 2],
+     /// Position evaluator.
+     evaluator: Evaluator,
+     /// Time manager.
+@@ -237,6 +242,8 @@ impl SearchEngine {
+             killers: KillerMoveTable::new(),
+             history: HistoryTable::new(),
+             counters: CounterMoveTable::new(),
++            cont_history: ContinuationHistory::new(),
++            move_stack: [NO_PREV; PV_SIZE + 2],
+             evaluator: Evaluator::new(),
+             time_manager: TimeManager::default(),
+             stats: SearchStats::default(),
+@@ -268,6 +275,7 @@ impl SearchEngine {
+         self.killers.clear();
+         self.history.clear();
+         self.counters.clear();
++        self.cont_history.clear();
+         self.stats.reset();
+         self.pv_len = [0; PV_SIZE];
+         for buf in &mut self.move_buffers {
+@@ -370,6 +378,7 @@ impl SearchEngine {
+ 
+         // Age history table for fresh search.
+         self.history.age();
++        self.cont_history.age();
+ 
+         // Clear killers for new search.
+         self.killers.clear();
+@@ -409,6 +418,7 @@ impl SearchEngine {
+ 
+         // Age history table for fresh search.
+         self.history.age();
++        self.cont_history.age();
+ 
+         // Clear killers for new search.
+         self.killers.clear();
+@@ -744,6 +754,20 @@ impl SearchEngine {
+             killer_moves,
+             &self.history,
+         );
++        // Continuation history: favour quiet moves that have worked after the moves one and
++        // two plies back on this line.
++        {
++            let p = ply as usize;
++            let prev1 = if p >= 1 { self.move_stack[p - 1] } else { NO_PREV };
++            let prev2 = if p >= 2 { self.move_stack[p - 2] } else { NO_PREV };
++            if prev1 != NO_PREV || prev2 != NO_PREV {
++                let cont = &self.cont_history;
++                orderer.add_quiet_bonus(|mv| {
++                    let key = cont_key(mv);
++                    cont.get(prev1, key) + cont.get(prev2, key)
++                });
++            }
++        }
+ 
+         // Enforce UCI `searchmoves` restriction at the root.
+         // Pre-scan (instead of filtering a collected Vec): if nothing legal
+@@ -819,6 +843,7 @@ impl SearchEngine {
+ 
+             // The position we are leaving joins the path for the children's repetition check.
+             self.path.push(hash);
++            self.move_stack[ply as usize] = cont_key(&mv);
+ 
+             // Principal variation search. The first move gets the full window. Every later
+             // move is scouted with a null window (reduced when LMR applies) and only
+@@ -1123,6 +1148,7 @@ impl SearchEngine {
+         let leaving = board.position_hash();
+         board.make_null_move();
+         self.path.push(leaving);
++        self.move_stack[ply as usize] = NO_PREV;
+ 
+         // Search with reduced depth.
+         let reduction = NULL_MOVE_REDUCTION + depth / 6;
+@@ -1210,6 +1236,25 @@ impl SearchEngine {
+ 
+         // Update history heuristic.
+         self.history.update(color, mv, quiets_tried, depth);
++
++        // Update continuation history against the moves one and two plies back.
++        let p = ply as usize;
++        let bonus = depth * depth;
++        for back in [1usize, 2] {
++            if p < back {
++                continue;
++            }
++            let prev = self.move_stack[p - back];
++            if prev == NO_PREV {
++                continue;
++            }
++            self.cont_history.update(prev, cont_key(mv), bonus);
++            for q in quiets_tried {
++                if q != mv {
++                    self.cont_history.update(prev, cont_key(q), -bonus);
++                }
++            }
++        }
+     }
+ 
+     /// Extract principal variation from the transposition table.
+diff --git a/src/search/move_ordering.rs b/src/search/move_ordering.rs
+index 4b3cdae..c815b86 100644
+--- a/src/search/move_ordering.rs
++++ b/src/search/move_ordering.rs
+@@ -186,6 +186,20 @@ impl MoveOrderer {
+         }
+     }
+ 
++    /// Add `bonus(mv)` to every plain quiet move (not the hash move, a killer, a capture or a
++    /// promotion). Called once after construction, before the first `next`.
++    pub fn add_quiet_bonus<F: Fn(&Move) -> i32>(&mut self, bonus: F) {
++        for i in 0..self.len {
++            let mv = self.moves[i].mv;
++            if mv.captured.is_none()
++                && !matches!(mv.move_type, MoveType::Promotion(_))
++                && self.moves[i].score < scores::KILLER_SECONDARY
++            {
++                self.moves[i].score += bonus(&mv);
++            }
++        }
++    }
++
+     /// Get the next best move using partial sorting.
+     ///
+     /// Uses selection sort to find the best remaining move,

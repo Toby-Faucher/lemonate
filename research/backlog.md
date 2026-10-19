@@ -25,11 +25,12 @@ time of writing.
 - [x] 0019-move-overhead: Move Overhead UCI option (see its result.json)
 - [x] 0020-fast-legality: skip make/unmake legality for non-pinned, non-king moves **Result: accepted, +54.3 ± 18.5 Elo, 923 games, LLR 2.95. Merged.**
 - [x] 0021-combined-main: rating check of main against 9359b37 **Result: +210.1 ± 41.8 Elo, 272 games.**
-- [x] 0022-late-move-pruning **Result: accepted, +56.3 ± 18.9 Elo, 928 games, LLR 2.96. Not merged yet; stacked in 0029.**
+- [x] 0022-late-move-pruning **Result: accepted, +56.3 ± 18.9 Elo, 928 games, LLR 2.96. Merged in #75 (stacked as 0029).**
 - [x] 0023-see-pruning **Result: inconclusive, +11.6 ± 8.9 Elo, 4000 games, LLR 2.21. Not merged.**
-- [x] 0024-improving **Result: accepted, +16.5 ± 9.5 Elo, 3487 games, LLR 2.94. Not merged yet; stacked in 0029.**
+- [x] 0024-improving **Result: accepted, +16.5 ± 9.5 Elo, 3487 games, LLR 2.94. Merged in #75 (stacked as 0029).**
 - [x] 0025-razoring **Result: inconclusive, +13.6 ± 9.0 Elo, 4000 games, LLR 2.64. Worth a re-run.**
 - [x] 0026-mate-distance **Result: inconclusive, -1.1 ± 8.9 Elo, 4000 games. Not merged.**
-- [ ] 0027-continuation-history: running at the time of writing, about -1 Elo after 2155 games
+- [x] 0027-continuation-history **Result: inconclusive, +1.0 ± 8.9 Elo, 4000 games. Not merged.**
 - [x] 0028-see-attacker-fix: correctness fix **Result: inconclusive, -0.8 ± 8.9 Elo, 4000 games (no strength change expected). Not merged.**
-- [ ] 0029-lmp-improving-stack: 0022 and 0024 together against main
+- [x] 0029-lmp-improving-stack **Result: accepted, +75.2 ± 22.1 Elo, 662 games, LLR 2.95. Merged (#75).**
+- [x] 0030-main-vs-prev: merged main 9e89100 against e492c25 **Result: accepted, +65.7 ± 20.6 Elo, 787 games, LLR 2.95.**
