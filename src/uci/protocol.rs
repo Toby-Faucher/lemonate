@@ -295,6 +295,8 @@ pub fn format_uci_id() -> String {
         HASH_DEFAULT_MB, HASH_MIN_MB, HASH_MAX_MB
     ));
     output.push_str("option name Threads type spin default 1 min 1 max 256\n");
+    output.push_str("option name OwnBook type check default false\n");
+    output.push_str("option name BookFile type string default <empty>\n");
     output.push_str("\n");
     output.push_str("uciok");
     output

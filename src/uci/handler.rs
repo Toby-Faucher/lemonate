@@ -6,7 +6,8 @@
 //! stdin take effect while a search is in progress. A shared atomic flag
 //! (see [`SearchLimits::with_stop_signal`]) halts the worker promptly.
 
-use crate::board::Board;
+use crate::board::{Board, Move, MoveType};
+use crate::book::BookManager;
 use crate::search::{parallel_search, SearchEngine, SearchLimits, SearchResult, SharedTT, MAX_DEPTH};
 use crate::types::Color;
 
@@ -56,6 +57,9 @@ pub struct UciEngine {
     shared_tt: Option<Arc<SharedTT>>,
     /// Current `Hash` option value in MB.
     hash_mb: usize,
+    /// Polyglot opening book (`BookFile`), consulted when `OwnBook` is on.
+    book: BookManager,
+    own_book: bool,
 }
 
 impl UciEngine {
@@ -73,6 +77,8 @@ impl UciEngine {
             num_threads: 1,
             shared_tt: None,
             hash_mb: HASH_DEFAULT_MB,
+            book: BookManager::new(),
+            own_book: false,
         }
     }
 
@@ -172,13 +178,13 @@ impl UciEngine {
             UciCommand::Uci => self.handle_uci(stdout),
             UciCommand::Debug(on) => self.debug = on,
             UciCommand::IsReady => self.handle_isready(stdout),
-            UciCommand::SetOption { name, value } => self.handle_setoption(&name, value),
+            UciCommand::SetOption { name, value } => self.handle_setoption(&name, value, stdout),
             UciCommand::Register => {} // Not implemented.
             UciCommand::UciNewGame => self.handle_ucinewgame(),
             UciCommand::Position { fen, moves } => {
                 self.handle_position(fen.as_deref(), &moves, stdout)
             }
-            UciCommand::Go(params) => self.handle_go(params),
+            UciCommand::Go(params) => self.handle_go(params, stdout),
             UciCommand::Stop => self.handle_stop(stdout),
             UciCommand::PonderHit => {} // Not implemented.
             UciCommand::Quit => return false,
@@ -249,7 +255,7 @@ impl UciEngine {
     }
 
     /// Handle "setoption" command.
-    fn handle_setoption(&mut self, name: &str, value: Option<String>) {
+    fn handle_setoption(&mut self, name: &str, value: Option<String>, stdout: &mut io::Stdout) {
         match name.to_lowercase().as_str() {
             "hash" => {
                 if let Some(v) = value {
@@ -264,6 +270,26 @@ impl UciEngine {
                         // The shared table is rebuilt lazily at the new size
                         // (no search is running, so no worker holds it).
                         self.shared_tt = None;
+                    }
+                }
+            }
+            "ownbook" => {
+                if let Some(v) = value {
+                    self.own_book = v.trim().eq_ignore_ascii_case("true");
+                }
+            }
+            "bookfile" => {
+                // UCI sends "<empty>" (or nothing) to clear a string option.
+                let path = value.unwrap_or_default();
+                let path = path.trim();
+                if path.is_empty() || path == "<empty>" {
+                    self.book = BookManager::new();
+                } else {
+                    let mut book = BookManager::new();
+                    match book.load(path) {
+                        Ok(()) if book.is_loaded() => self.book = book,
+                        Ok(()) => self.report_error(stdout, &format!("book '{}' has no entries", path)),
+                        Err(e) => self.report_error(stdout, &format!("cannot load book '{}': {}", path, e)),
                     }
                 }
             }
@@ -340,6 +366,26 @@ impl UciEngine {
         self.board = board;
     }
 
+    /// The book's choice for the current position, as a legal move of that position.
+    ///
+    /// Book files come from outside, so the decoded move is only used to pick among the
+    /// engine's own legal moves (matched on squares and promotion). An entry that is not
+    /// legal here is ignored and the engine searches instead.
+    fn book_move(&self) -> Option<Move> {
+        if !self.book.is_loaded() {
+            return None;
+        }
+        let wanted = self.book.probe(&self.board)?;
+        let promotion = |m: &Move| match m.move_type {
+            MoveType::Promotion(p) => Some(p),
+            _ => None,
+        };
+        self.board
+            .generate_legal_moves()
+            .into_iter()
+            .find(|m| m.from == wanted.from && m.to == wanted.to && promotion(m) == promotion(&wanted))
+    }
+
     /// Report a recoverable protocol problem to the GUI.
     fn report_error(&self, stdout: &mut io::Stdout, msg: &str) {
         let _ = writeln!(stdout, "info string error: {}", msg);
@@ -347,9 +393,25 @@ impl UciEngine {
     }
 
     /// Handle "go" command: start a search on the worker thread.
-    fn handle_go(&mut self, params: GoParams) {
+    fn handle_go(&mut self, params: GoParams, stdout: &mut io::Stdout) {
         // Only one search at a time; stop (and discard) any active one.
         self.stop_search();
+
+        // A book move needs no search. Analysis requests (infinite, ponder, fixed depth or
+        // nodes, mate search, searchmoves) are left to the engine.
+        let analysis = params.infinite
+            || params.ponder
+            || params.depth.is_some()
+            || params.nodes.is_some()
+            || params.mate.is_some()
+            || !params.searchmoves.is_empty();
+        if self.own_book && !analysis {
+            if let Some(mv) = self.book_move() {
+                let _ = writeln!(stdout, "info string book move");
+                self.write_bestmove(stdout, Some(mv));
+                return;
+            }
+        }
 
         let stop = Arc::new(AtomicBool::new(false));
         let mut limits = self.go_params_to_limits(&params, Arc::clone(&stop));
