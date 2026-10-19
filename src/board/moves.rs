@@ -1,4 +1,4 @@
-use crate::{AttackTable, Board, CastlingRights, Color, Piece, PieceType, Square};
+use crate::{AttackTable, Bitboard, Board, CastlingRights, Color, Piece, PieceType, Square};
 use once_cell::sync::Lazy;
 
 // Global static attack table - initialized once and shared across all boards
@@ -20,6 +20,15 @@ pub enum MoveType {
     EnPassant,
     Castle,
     Promotion(PieceType), // Queen, Rook, Bishop, Knight
+}
+
+/// Per-position facts for the legality filter, see [`Board::legality_context`].
+#[derive(Clone, Copy)]
+struct LegalityContext {
+    /// Every move must be tested by making it: the side to move is in check or has no king.
+    test_all: bool,
+    /// Own pieces pinned to the king (empty when `test_all`).
+    pinned: Bitboard,
 }
 
 impl Move {
@@ -82,11 +91,12 @@ impl Board {
     /// as scratch for pseudo-legal moves, then compacted in place.
     pub fn generate_legal_moves_into(&mut self, buf: &mut Vec<Move>) {
         self.generate_pseudo_legal_moves_into(buf);
+        let ctx = self.legality_context();
 
         let mut w = 0;
         for r in 0..buf.len() {
             let mv = buf[r];
-            if self.is_legal_move_fast(mv) {
+            if self.is_legal_with(mv, ctx) {
                 buf[w] = mv;
                 w += 1;
             }
@@ -102,11 +112,12 @@ impl Board {
     /// legality test entirely.
     pub fn generate_legal_tacticals_into(&mut self, buf: &mut Vec<Move>) {
         self.generate_pseudo_legal_moves_into(buf);
+        let ctx = self.legality_context();
 
         let mut w = 0;
         for r in 0..buf.len() {
             let mv = buf[r];
-            if mv.is_tactical() && self.is_legal_move_fast(mv) {
+            if mv.is_tactical() && self.is_legal_with(mv, ctx) {
                 buf[w] = mv;
                 w += 1;
             }
@@ -121,15 +132,80 @@ impl Board {
     /// a quiet position (stand pat) from stalemate (no legal moves at all).
     pub fn has_legal_quiet(&mut self, buf: &mut Vec<Move>) -> bool {
         self.generate_pseudo_legal_moves_into(buf);
+        let ctx = self.legality_context();
         for r in 0..buf.len() {
             let mv = buf[r];
-            if !mv.is_tactical() && self.is_legal_move_fast(mv) {
+            if !mv.is_tactical() && self.is_legal_with(mv, ctx) {
                 buf.clear();
                 return true;
             }
         }
         buf.clear();
         false
+    }
+
+    /// What the legality filter needs to know about the position, computed once per node.
+    fn legality_context(&self) -> LegalityContext {
+        let color = self.side_to_move;
+        let enemy = color.opposite();
+        let king_bb = self.piece_bitboards[color as usize][PieceType::King as usize];
+        let Some(king_sq) = king_bb.into_iter().next() else {
+            return LegalityContext { test_all: true, pinned: Bitboard::EMPTY };
+        };
+        if self.is_square_attacked(king_sq, enemy) {
+            return LegalityContext { test_all: true, pinned: Bitboard::EMPTY };
+        }
+
+        // A piece is pinned when it is the only piece between the king and an enemy slider
+        // that attacks along that line.
+        let e = enemy as usize;
+        let rooks_queens = self.piece_bitboards[e][PieceType::Rook as usize]
+            | self.piece_bitboards[e][PieceType::Queen as usize];
+        let bishops_queens = self.piece_bitboards[e][PieceType::Bishop as usize]
+            | self.piece_bitboards[e][PieceType::Queen as usize];
+        let own = self.color_bitboard[color as usize];
+        let king_bit = Bitboard(1u64 << king_sq.index());
+
+        let mut pinned = Bitboard::EMPTY;
+        let straight = ATTACK_TABLE.rook_attacks(king_sq, Bitboard::EMPTY) & rooks_queens;
+        for sniper in straight {
+            let sniper_bit = Bitboard(1u64 << sniper.index());
+            let between = ATTACK_TABLE.rook_attacks(king_sq, sniper_bit)
+                & ATTACK_TABLE.rook_attacks(sniper, king_bit);
+            let blockers = between & self.all_pieces;
+            if blockers.count_pieces() == 1 {
+                pinned |= blockers & own;
+            }
+        }
+        let diagonal = ATTACK_TABLE.bishop_attacks(king_sq, Bitboard::EMPTY) & bishops_queens;
+        for sniper in diagonal {
+            let sniper_bit = Bitboard(1u64 << sniper.index());
+            let between = ATTACK_TABLE.bishop_attacks(king_sq, sniper_bit)
+                & ATTACK_TABLE.bishop_attacks(sniper, king_bit);
+            let blockers = between & self.all_pieces;
+            if blockers.count_pieces() == 1 {
+                pinned |= blockers & own;
+            }
+        }
+
+        LegalityContext { test_all: false, pinned }
+    }
+
+    /// Legality of a pseudo-legal move given the per-position `ctx`.
+    ///
+    /// With the king not in check, a move by a piece that is neither the king nor pinned cannot
+    /// expose it, so it needs no test. King moves, en passant (which removes two pawns from a
+    /// rank at once) and pinned pieces are made and checked; so is every move when in check.
+    #[inline]
+    fn is_legal_with(&mut self, mv: Move, ctx: LegalityContext) -> bool {
+        if ctx.test_all
+            || mv.piece.piece_type == PieceType::King
+            || mv.move_type == MoveType::EnPassant
+            || ctx.pinned.is_set(mv.from)
+        {
+            return self.is_legal_move_fast(mv);
+        }
+        true
     }
 
     /// Legality test via do/undo on `self` (no clone). Must agree exactly
@@ -909,6 +985,50 @@ mod tests {
             // has_legal_quiet agrees with full-list quiet existence.
             let any_quiet = full.iter().any(|m| !m.is_tactical());
             assert_eq!(board.has_legal_quiet(&mut buf), any_quiet, "quiet probe in {}", fen);
+        }
+    }
+
+    /// The fast legality filter (pins computed once per node) must give exactly the moves of the
+    /// make-a-copy reference, in the same order, in positions built to break shortcuts.
+    #[test]
+    fn fast_legality_matches_the_reference() {
+        let fens = [
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",           // rook pin along a rank
+            "4k3/8/8/8/1b6/8/3N4/4K3 w - - 0 1",                   // knight pinned by a bishop
+            "4k3/4r3/8/8/8/4B3/8/4K3 w - - 0 1",                   // bishop pinned on the file
+            "4k3/8/8/8/8/2q5/3P4/4K3 w - - 0 1",                   // pawn pinned diagonally, may capture the pinner? no
+            "4k3/8/8/q1pP1K2/8/8/8/8 w - c6 0 1",                  // en passant exposing the king on a rank
+            "8/8/8/8/k2Pp2Q/8/8/3K4 b - d3 0 1",                   // en passant, queen on the rank
+            "4k3/8/8/8/8/8/4q3/4K3 w - - 0 1",                     // in check, king may capture
+            "4k3/8/8/8/8/5n2/8/4K1R1 w - - 0 1",                   // not in check, pinned nothing
+            "r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1",                // castling both sides
+            "r3k2r/8/8/8/8/5q2/8/R3K2R w KQkq - 0 1",              // castling through an attacked square
+            "4k3/8/8/2b5/8/8/3B4/4K3 w - - 0 1",                   // two bishops: only the blocker is pinned
+            "n1n5/PPPk4/8/8/8/8/4Kppp/5N1N b - - 0 1",             // promotions
+            "4k3/8/8/8/8/8/8/4K3 w - - 0 1",                       // bare kings
+            "7k/5Q2/6K1/8/8/8/8/8 b - - 0 1",                      // stalemate
+            "7k/6Q1/6K1/8/8/8/8/8 b - - 0 1",                      // checkmate
+        ];
+        for fen in fens {
+            let mut board = Board::from_fen(fen).unwrap();
+            let reference = board.generate_legal_moves();
+            let mut fast = Vec::new();
+            board.generate_legal_moves_into(&mut fast);
+            assert_eq!(fast, reference, "mismatch in {}", fen);
+
+            // The tactical and quiet probes share the same filter.
+            let mut tacticals = Vec::new();
+            board.generate_legal_tacticals_into(&mut tacticals);
+            let expected: Vec<_> = reference.iter().copied().filter(|m| m.is_tactical()).collect();
+            assert_eq!(tacticals, expected, "tacticals differ in {}", fen);
+            let mut scratch = Vec::new();
+            assert_eq!(
+                board.has_legal_quiet(&mut scratch),
+                reference.iter().any(|m| !m.is_tactical()),
+                "quiet probe differs in {}", fen
+            );
         }
     }
 }
