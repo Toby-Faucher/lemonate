@@ -284,7 +284,9 @@ def status_many(names):
         chunks[n] = f"{state}\n{log}"
     if script:
         r = sh("ssh", HOST, script)
-        if r.returncode:  # a down machine must not read as QUEUED
+        # ssh exits 255 when it cannot connect; any other code is the last remote command (a `cat`
+        # of the log of a match that has not started yet exits 1), so it is not a failure.
+        if r.returncode == 255:  # a down machine must not read as QUEUED
             print(f"warning: ssh to {HOST} failed ({r.stderr.strip() or r.returncode})", file=sys.stderr)
             for n, m in metas.items():
                 if n not in local:
