@@ -16,6 +16,57 @@ python3 bench/test_bench.py       # unit tests for the record logic
 
 Python 3 stdlib only. Needs `podman` and `taskset`.
 
+## Strength: SPRT matches on chess-test
+
+`bench/sprt.py` queues cutechess matches with the same settings as the research gate (they are
+read from `research/config.toml`), but lets several run back to back and be watched:
+
+```bash
+bench/sprt.py start 0015-pvs main exp/0015-pvs   # build both here, ship, queue (bounds from the config)
+bench/sprt.py start 0019-x main feat/x --elo0 -4 --elo1 1   # non-regression bounds
+bench/sprt.py status                             # one line per match: games, score, Elo, LLR, verdict
+bench/sprt.py wait NAME                          # block until it finishes
+bench/sprt.py cancel NAME
+bench/sprt.py record NAME ID                     # write research/experiments/ID/{result,sprt}.json + patch.diff
+```
+
+Two machines can play matches, one match at a time each: `chess-test` (the container the gate uses)
+and the local machine, where cutechess runs in a small Debian container on the 16 performance-core threads (16 games at a time) at low
+priority. Do not run `bench.py` while a local match plays: it pins to cpu 14, one of those threads. `--runner auto`, the default,
+sends a match to whichever has fewer matches waiting or running; `--runner bawn|chess-test` forces
+one. The first local match fetches the cutechess binary and the opening book from `chess-test` and
+builds the runner image. Each result is fair on its own because both engines play on the same
+machine, but the two machines are different CPUs, so compare Elo between matches, not nps.
+
+Engines are built in the pinned container with a portable target (`x86-64-v3`) and, for
+`chess-test`, copied over, so nothing compiles on the match machine while a game is running.
+Remote matches queue on the same lock the gate uses. `record` leaves `hypothesis.md` and `trace.md` to be written by
+hand; then `research/scripts/catalog.sh` regenerates `CATALOG.md`. Unlike `gate.sh`, this does not
+check the diff against the protected paths or run the local test stages, so run the tests yourself.
+
+## Absolute strength: Elo against Stockfish
+
+An SPRT says one version beats another; it never says how strong either is. `bench/elo.py` rates
+versions on a fixed scale by playing each against Stockfish 15.1 limited to four `UCI_Elo` levels
+(1500, 1800, 2100, 2400; 100 games each, 10+0.1, the research book):
+
+```bash
+bench/elo.py start            # the speed record holders plus main and the PVS branch (or pass revisions)
+bench/elo.py status           # games played and a provisional rating per version
+bench/elo.py collect          # write finished versions to bench/elo.jsonl
+bench/bench.py report         # the report gets an "Elo vs Stockfish" tab with its own record line
+```
+
+A version's rating R solves `sum n * E(R - anchor) = sum score` over its games, and the error shown
+is the 95% interval from the games' own variance. A version that loses or wins every game lies
+outside the anchors and is not recorded. Jobs alternate between the two machines and queue on the
+same locks as the SPRT matches.
+
+The scale is Stockfish 15.1's `UCI_Elo` (range 1350-2850), the same one the earlier calibration on
+`chess-test` used. It is not CCRL or FIDE, so read the numbers against each other, not as an official
+rating. A new Elo record must beat the standing one by 30 points: one measurement is good to about
++/-50.
+
 ## What is measured
 
 | Metric | How | Why |
