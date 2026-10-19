@@ -15,6 +15,15 @@ The release profile uses fat LTO and `panic = "abort"`. The CPU flags are for sp
 `popcnt` enabled the bit scans and piece counts compile to single instructions, and the engine still
 builds and runs without them, only slower. Build on the machine that will run it.
 
+**ARM (for example a Raspberry Pi 5):** leave out the x86 flags, which do not exist there:
+
+```bash
+RUSTFLAGS="-C target-cpu=native" cargo build --release
+```
+
+The engine has no architecture-specific code beyond an x86 shortcut that falls back to portable
+code. The perft tests were run for `aarch64` under emulation and pass.
+
 ```text
 uci
 position startpos moves e2e4 e7e5
