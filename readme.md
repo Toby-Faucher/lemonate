@@ -11,8 +11,9 @@ RUSTFLAGS="-C target-cpu=native -C target-feature=+bmi2,+popcnt" cargo build --r
 ./target/release/lemonate        # then type UCI commands, or point a GUI at the binary
 ```
 
-The release profile uses fat LTO and `panic = "abort"`. `bmi2` and `popcnt` are assumed by the hot
-paths, so build on (or for) a CPU that has them.
+The release profile uses fat LTO and `panic = "abort"`. The CPU flags are for speed: with `bmi1` and
+`popcnt` enabled the bit scans and piece counts compile to single instructions, and the engine still
+builds and runs without them, only slower. Build on the machine that will run it.
 
 ```text
 uci
