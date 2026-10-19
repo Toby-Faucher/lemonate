@@ -37,7 +37,7 @@ pub use history::{CounterMoveTable, HistoryTable};
 pub use killer_moves::KillerMoveTable;
 pub use move_ordering::{is_good_capture, order_captures_into, MoveOrderer, ScoredMove, MAX_MOVES};
 pub use smp::{parallel_search, MAX_THREADS};
-pub use time_manager::{SearchLimits, TimeControl, TimeManager};
+pub use time_manager::{InfoSink, SearchLimits, TimeControl, TimeManager};
 pub use transposition::{EntryType, SharedTT, TranspositionEntry, TranspositionTable};
 
 use crate::board::{Move, MoveType};
@@ -146,6 +146,8 @@ pub struct SearchStats {
     pub depth: u8,
     /// Selective depth (max ply reached).
     pub seldepth: u8,
+    /// Transposition table fill in permille (0-1000), sampled when the iteration finished.
+    pub hashfull: u16,
 }
 
 impl SearchStats {
@@ -222,6 +224,8 @@ pub struct SearchEngine {
     /// back to the last irreversible move. `path_root` is where the search proper starts.
     path: Vec<u64>,
     path_root: usize,
+    /// Where completed iterations are reported (UCI `info` stream), if anywhere.
+    info_sink: Option<InfoSink>,
 }
 
 impl SearchEngine {
@@ -242,6 +246,7 @@ impl SearchEngine {
             move_buffers: Vec::new(),
             path: Vec::new(),
             path_root: 0,
+            info_sink: None,
         }
     }
 
@@ -304,6 +309,14 @@ impl SearchEngine {
         }
     }
 
+    /// Fill of the active transposition table in permille.
+    fn tt_hashfull(&self) -> u16 {
+        match &self.shared {
+            Some(shared) => shared.hashfull(),
+            None => self.tt.hashfull(),
+        }
+    }
+
     /// Bump the age of the active transposition table.
     fn tt_new_search(&mut self) {
         if let Some(shared) = &self.shared {
@@ -339,6 +352,7 @@ impl SearchEngine {
 
         // Store root move restriction (UCI searchmoves).
         self.root_moves = limits.root_moves.clone();
+        self.info_sink = limits.info_sink.clone();
 
         // Age history table for fresh search.
         self.history.age();
@@ -377,6 +391,7 @@ impl SearchEngine {
 
         // Store root move restriction (UCI searchmoves).
         self.root_moves = limits.root_moves.clone();
+        self.info_sink = limits.info_sink.clone();
 
         // Age history table for fresh search.
         self.history.age();
@@ -456,6 +471,12 @@ impl SearchEngine {
                 self.extract_pv(&mut board, depth)
             };
             result.stats = self.stats.clone();
+            result.stats.hashfull = self.tt_hashfull();
+
+            // Stream the finished iteration to the GUI while the search is still running.
+            if let Some(sink) = &self.info_sink {
+                sink.emit(&result);
+            }
         }
 
         // Out of time before even depth 1 produced a move (tiny clock, or a

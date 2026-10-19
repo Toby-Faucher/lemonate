@@ -260,3 +260,89 @@ fn the_book_options_are_advertised() {
     assert!(out.iter().any(|l| l == "option name OwnBook type check default false"), "{out:?}");
     assert!(out.iter().any(|l| l == "option name BookFile type string default <empty>"), "{out:?}");
 }
+
+// ---- Move Overhead, Clear Hash, streamed info ----
+
+fn info_depths(lines: &[String]) -> Vec<u32> {
+    lines
+        .iter()
+        .filter(|l| l.starts_with("info depth"))
+        .filter_map(|l| l.split_whitespace().nth(2)?.parse().ok())
+        .collect()
+}
+
+fn info_field(line: &str, key: &str) -> Option<u64> {
+    let mut it = line.split_whitespace();
+    while let Some(t) = it.next() {
+        if t == key {
+            return it.next()?.parse().ok();
+        }
+    }
+    None
+}
+
+#[test]
+fn info_lines_stream_while_the_search_is_still_running() {
+    // `go infinite` never ends by itself, so three info lines before any bestmove prove they
+    // are sent per iteration, not once at the end.
+    let out = run_until("position startpos\ngo infinite\n", "info depth", 3);
+    let depths = info_depths(&out);
+    assert!(depths.len() >= 3, "{out:?}");
+    assert!(depths.windows(2).all(|w| w[0] <= w[1]), "depths should not go backwards: {depths:?}");
+    assert!(!out.iter().any(|l| l.starts_with("bestmove")), "{out:?}");
+}
+
+#[test]
+fn a_fixed_depth_search_reports_every_depth_and_the_hash_fill() {
+    let out = run("position startpos\ngo depth 6\n", 1);
+    let depths = info_depths(&out);
+    for d in 1..=6 {
+        assert!(depths.contains(&d), "missing depth {d} in {depths:?}");
+    }
+    assert!(
+        out.iter().filter(|l| l.starts_with("info depth")).all(|l| info_field(l, "hashfull").is_some()),
+        "{out:?}"
+    );
+}
+
+#[test]
+fn a_huge_move_overhead_still_answers_with_a_move() {
+    let out = run("setoption name Move Overhead value 5000\nposition startpos\ngo movetime 200\n", 1);
+    assert_ne!(bestmove(&out).expect("bestmove"), "0000");
+}
+
+#[test]
+fn move_overhead_is_taken_off_the_search_time() {
+    // 300 ms of movetime with 250 ms reserved leaves about 50 ms; without the reserve the
+    // search runs for most of the 300 ms.
+    let reserved = run("setoption name Move Overhead value 250\nposition startpos\ngo movetime 300\n", 1);
+    let free = run("setoption name Move Overhead value 0\nposition startpos\ngo movetime 300\n", 1);
+    let time = |lines: &[String]| {
+        lines
+            .iter()
+            .filter(|l| l.starts_with("info depth"))
+            .filter_map(|l| info_field(l, "time"))
+            .max()
+            .expect("an info line with a time")
+    };
+    assert!(time(&reserved) < 150, "reserved: {}", time(&reserved));
+    assert!(time(&free) > 150, "free: {}", time(&free));
+}
+
+#[test]
+fn clear_hash_is_accepted_and_play_continues() {
+    // Options arrive while the engine is idle, so clear between a finished search and the next.
+    let out = run(
+        "position startpos\nsetoption name Clear Hash\nsetoption name Threads value 2\nsetoption name Clear Hash\ngo depth 4\n",
+        1,
+    );
+    assert!(!out.iter().any(|l| l.starts_with("info string error")), "{out:?}");
+    assert_ne!(bestmove(&out).expect("bestmove"), "0000");
+}
+
+#[test]
+fn the_new_options_are_advertised() {
+    let out = run_until("uci\n", "uciok", 1);
+    assert!(out.iter().any(|l| l == "option name Move Overhead type spin default 10 min 0 max 5000"), "{out:?}");
+    assert!(out.iter().any(|l| l == "option name Clear Hash type button"), "{out:?}");
+}
