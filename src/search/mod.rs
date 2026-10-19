@@ -593,7 +593,7 @@ impl SearchEngine {
         board: &mut Board,
         mut depth: i32,
         mut alpha: i32,
-        beta: i32,
+        mut beta: i32,
         ply: u8,
     ) -> i32 {
         // Save original alpha for TT entry type determination.
@@ -660,6 +660,17 @@ impl SearchEngine {
                 };
             }
         }
+
+        // Mate distance pruning: no line from here can score better than mating on the next
+        // move, or worse than being mated now, so tighten the window to that range.
+        if ply > 0 {
+            alpha = alpha.max(-MATE_SCORE + ply as i32);
+            beta = beta.min(MATE_SCORE - ply as i32 - 1);
+            if alpha >= beta {
+                return alpha;
+            }
+        }
+        let original_alpha = alpha;
 
         // TT probing - get hash move and potentially cutoff
         let mut hash_move: Option<Move> = None;
