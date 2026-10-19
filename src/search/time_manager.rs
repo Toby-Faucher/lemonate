@@ -10,7 +10,7 @@
 
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use std::time::{Duration, Instant};
 
@@ -95,6 +95,9 @@ pub struct SearchLimits {
     /// Lazy SMP only: set by worker 0 when it finishes so helper threads stop at once
     /// instead of running on to their own hard limit (optional).
     pub helper_stop: Option<Arc<AtomicBool>>,
+    /// Lazy SMP only: node counter shared by all workers so `go nodes N` bounds the
+    /// whole search rather than each worker (optional; only set with a node limit).
+    pub shared_nodes: Option<Arc<AtomicU64>>,
 }
 
 impl SearchLimits {
@@ -109,6 +112,7 @@ impl SearchLimits {
             overhead_ms: 0,
             info_sink: None,
             helper_stop: None,
+            shared_nodes: None,
         }
     }
 
@@ -123,6 +127,7 @@ impl SearchLimits {
             overhead_ms: 0,
             info_sink: None,
             helper_stop: None,
+            shared_nodes: None,
         }
     }
 
@@ -137,6 +142,7 @@ impl SearchLimits {
             overhead_ms: 0,
             info_sink: None,
             helper_stop: None,
+            shared_nodes: None,
         }
     }
 
@@ -155,6 +161,7 @@ impl SearchLimits {
             overhead_ms: 0,
             info_sink: None,
             helper_stop: None,
+            shared_nodes: None,
         }
     }
 
@@ -225,6 +232,8 @@ pub struct TimeManager {
     stop_signal: Option<Arc<AtomicBool>>,
     /// Lazy SMP: set when worker 0 is done (see `SearchLimits::helper_stop`).
     helper_stop: Option<Arc<AtomicBool>>,
+    /// Lazy SMP node counter shared across workers (see `SearchLimits::shared_nodes`).
+    shared_nodes: Option<Arc<AtomicU64>>,
 }
 
 impl TimeManager {
@@ -272,6 +281,7 @@ impl TimeManager {
             use_time_limit,
             stop_signal: limits.stop_signal.clone(),
             helper_stop: limits.helper_stop.clone(),
+            shared_nodes: limits.shared_nodes.clone(),
         }
     }
 
@@ -392,7 +402,11 @@ impl TimeManager {
     /// Update node count for node limit checking.
     #[inline]
     pub fn add_nodes(&mut self, nodes: u64) {
-        self.nodes_searched += nodes;
+        match &self.shared_nodes {
+            // Limit checks then see the total across all workers.
+            Some(total) => self.nodes_searched = total.fetch_add(nodes, Ordering::Relaxed) + nodes,
+            None => self.nodes_searched += nodes,
+        }
     }
 
     /// Get the current node count.
@@ -518,6 +532,7 @@ impl Default for TimeManager {
             use_time_limit: false,
             stop_signal: None,
             helper_stop: None,
+            shared_nodes: None,
         }
     }
 }

@@ -17,7 +17,7 @@ use crate::Board;
 
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
 /// Maximum worker threads (matches the UCI `Threads` option ceiling).
@@ -69,12 +69,17 @@ pub fn parallel_search(
     // worker 0 raises this flag on exit to stop them promptly.
     let helper_stop = Arc::new(AtomicBool::new(false));
 
+    // `go nodes N` bounds the whole search: all workers count into one total. Left unset
+    // without a node limit so unlimited searches never touch a contended counter.
+    let shared_nodes = limits.max_nodes.map(|_| Arc::new(AtomicU64::new(0)));
+
     let mut main_engine = Some(main_engine);
     let mut handles = Vec::with_capacity(num_threads);
     for thread_id in 0..num_threads {
         let board = board.clone();
         let mut limits = limits.clone();
         limits.helper_stop = Some(Arc::clone(&helper_stop));
+        limits.shared_nodes = shared_nodes.clone();
         // Only worker 0 reports iterations; helpers search at staggered depths and would
         // interleave misleading lines.
         if thread_id != 0 {
