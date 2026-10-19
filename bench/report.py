@@ -19,7 +19,7 @@ def repo_url(root):
     return u[:-4] if u.endswith(".git") else u
 
 
-def build_payload(rows, metrics, points, records, anchor, config, extra_rows=()):
+def build_payload(rows, metrics, points, records, anchor, config, extra_rows=(), sprt=()):
     data = {}
     point_rows = list(rows) + list(extra_rows)
     for key, (label, unit, lower) in metrics.items():
@@ -34,6 +34,7 @@ def build_payload(rows, metrics, points, records, anchor, config, extra_rows=())
     for r in rows:
         statuses[r.get("status", "?")] = statuses.get(r.get("status", "?"), 0) + 1
     return {
+        "sprt": list(sprt),
         "metrics": data,
         "meta": {
             "generated": int(time.time()),
@@ -62,8 +63,8 @@ def to_fragment(html):
     return html
 
 
-def write(rows, out, metrics, points, records, anchor, config, fragment=False, extra_rows=()):
-    payload = build_payload(rows, metrics, points, records, anchor, config, extra_rows)
+def write(rows, out, metrics, points, records, anchor, config, fragment=False, extra_rows=(), sprt=()):
+    payload = build_payload(rows, metrics, points, records, anchor, config, extra_rows, sprt)
     blob = json.dumps(payload, separators=(",", ":")).replace("</", "<\\/")
     html = TEMPLATE.replace("/*__DATA__*/null", blob)
     Path(out).write_text(to_fragment(html) if fragment else html)
@@ -191,6 +192,9 @@ h2 { font-family: var(--display); font-size: 15px; text-transform: uppercase; le
   </div>
   <h2>Record holders</h2>
   <div class="card" style="overflow-x:auto"><table id="table"></table></div>
+  <h2>Confirmed head to head</h2>
+  <div class="card" style="overflow-x:auto"><table id="sprt"></table></div>
+  <div class="foot" id="sprtnote"></div>
   <div class="foot" id="foot"></div>
 </main>
 <script>
@@ -267,6 +271,7 @@ function draw() {
   svg.innerHTML = "";
   stats(m);
   table(m);
+  sprtTable();
   const pts = m.points;
   if (!pts.length) {
     $("banner").classList.remove("on");
@@ -360,6 +365,22 @@ function table(m) {
     h += `<tr class="${r.current ? "current" : ""}"><td class="mono">${i + 1}</td><td class="mono">${fmtDate(r.ts)}</td><td class="mono">${commitLink(r)}</td>` +
       `<td class="num mono">${fmtVal(r.value, m)}</td><td class="num mono">${imp}</td>` +
       `<td class="num mono hide-sm">${r.current ? "now" : Math.round(r.held_days || 0) + " d"}</td><td>${esc(r.subject)}<div class="who">${esc(r.author)}</div></td></tr>`;
+  });
+  t.innerHTML = h;
+}
+
+function sprtTable() {
+  const t = $("sprt"), rows = DATA.sprt || [];
+  $("sprtnote").textContent = "Each row is one change played against the version just before it (SPRT, 95% error bars). " +
+    "This is the sharp test for small gains; the Elo tab above only shows the overall trend, with about \u00b140 Elo of error per version.";
+  if (!rows.length) { t.innerHTML = '<tr><td class="empty">No head-to-head results yet.</td></tr>'; return; }
+  let h = '<tr><th>Experiment</th><th>Commit</th><th class="num">Games</th><th class="num">Elo</th><th>Verdict</th></tr>';
+  rows.forEach((r) => {
+    const elo = r.elo == null ? "\u2013" : `${r.elo > 0 ? "+" : ""}${r.elo.toFixed(0)} \u00b1 ${r.elo_err.toFixed(0)}`;
+    const ok = r.verdict === "H1", cls = ok ? "good" : "";
+    const word = ok ? "better" : r.verdict === "H0" ? "no gain" : "inconclusive";
+    h += `<tr><td>${esc(r.name)}</td><td class="mono">${esc(r.baseline)} &rarr; ${esc(r.candidate)}</td><td class="num mono">${r.games}</td>` +
+      `<td class="num mono ${cls}">${elo}</td><td class="${cls}">${word}</td></tr>`;
   });
   t.innerHTML = h;
 }

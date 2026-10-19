@@ -55,9 +55,10 @@ UCI_MAIN = "use lemonate::uci::UciEngine;\n\nfn main() {\n    let mut engine = U
 # percent. Timings repeat to within ~1%, so smaller "wins" are noise. Node counts are
 # deterministic, so any reduction is real.
 RECORD_MIN_PCT = {"ttd_ms": 1.5, "ttd_light_ms": 3.0, "nps": 1.5, "nodes": 0.0}
-# Elo is a difference, not a ratio: a version must beat the standing record by this many points.
-# A measurement is good to about +/-50 at 400 games, so smaller steps are not distinguishable.
-RECORD_MIN_ABS = {"elo": 30.0}
+# Elo is a difference, not a ratio. A new Elo record must beat the standing one by more than the
+# two measurements' combined error (their 95% half-widths added in quadrature), so a gain that
+# could be noise is not crowned. Head-to-head SPRT results are the better evidence for small gains.
+ELO_SIGNIFICANT = True
 
 # Metric name -> (label, unit, lower_is_better)
 METRICS = {
@@ -674,7 +675,7 @@ def points(rows, metric):
         if v is None:
             continue
         pts.append({"commit": r["commit"], "short": r["short"], "ts": r["ts"], "author": r["author"],
-                    "subject": r["subject"], "value": v})
+                    "subject": r["subject"], "value": v, "err": r.get("elo_err") if metric == "elo" else None})
     pts.sort(key=lambda p: p["ts"])
     return pts
 
@@ -684,12 +685,12 @@ def records(pts, lower_is_better, metric=None):
     metric's noise floor (RECORD_MIN_PCT)."""
     out, best, prev_ts = [], None, None
     margin = RECORD_MIN_PCT.get(metric, 0.0) / 100.0
-    step = RECORD_MIN_ABS.get(metric, 0.0)
+    best_err = 0.0
     for p in pts:
         if best is None:
             better = True
-        elif step:
-            better = p["value"] < best - step if lower_is_better else p["value"] > best + step
+        elif metric == "elo" and ELO_SIGNIFICANT:
+            better = p["value"] - best > math.hypot(p.get("err") or 0.0, best_err)
         elif lower_is_better:
             better = p["value"] < best * (1 - margin) if margin else p["value"] < best
         else:
@@ -703,9 +704,27 @@ def records(pts, lower_is_better, metric=None):
                 out[-1]["held_days"] = round((p["ts"] - out[-1]["ts"]) / 86400, 1)
             out.append(rec)
             best = p["value"]
+            best_err = p.get("err") or 0.0
     if out:
         out[-1]["held_days"] = round((time.time() - out[-1]["ts"]) / 86400, 1)
         out[-1]["current"] = True
+    return out
+
+
+def read_sprt():
+    """Head-to-head SPRT results from research/experiments/*/result.json, oldest experiment first."""
+    out = []
+    for f in sorted((ROOT / "research" / "experiments").glob("*/result.json")):
+        try:
+            d = json.loads(f.read_text())
+        except (OSError, ValueError):
+            continue
+        t = d.get("sprt") or {}
+        if not t.get("games"):
+            continue
+        out.append({"name": f.parent.name, "candidate": d["candidate_commit"][:7], "baseline": d["baseline_commit"][:7],
+                    "games": t["games"], "elo": t.get("elo"), "elo_err": t.get("elo_err"),
+                    "verdict": t.get("verdict", "?"), "status": d.get("status", "")})
     return out
 
 
@@ -776,7 +795,7 @@ def cmd_report(args):
                 r = json.loads(line)
                 elo_rows.append({**r, "status": "ok"})
     rpt.write(rows, out, METRICS, points, records, anchor_load(), CONFIG, fragment=args.fragment,
-              extra_rows=elo_rows)
+              extra_rows=elo_rows, sprt=read_sprt())
     print(f"wrote {out}")
 
 

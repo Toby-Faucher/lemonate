@@ -44,6 +44,13 @@ class Records(unittest.TestCase):
         self.assertEqual([r["value"] for r in recs], [100, 97])
         self.assertAlmostEqual(recs[1]["improvement_pct"], 3.0)
 
+    def test_elo_record_needs_a_gain_beyond_the_combined_error(self):
+        def e(v, err, ts):
+            return {"value": v, "err": err, "ts": ts}
+        # +33 with +/-40 on both is inside the combined +/-57; +72 is outside it.
+        recs = bench.records([e(1644, 46, 1), e(1716, 41, 2), e(1749, 39, 3), e(1757, 45, 4)], False, "elo")
+        self.assertEqual([r["value"] for r in recs], [1644, 1716])
+
     def test_empty(self):
         self.assertEqual(bench.records([], True), [])
 
