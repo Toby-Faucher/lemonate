@@ -2,12 +2,12 @@ use crate::bitboard::Bitboard;
 use crate::magic::AttackTable;
 use crate::types::{Color, PieceType};
 use crate::Board;
-use once_cell::sync::Lazy;
+use std::sync::LazyLock;
 
 use super::phase::GamePhase;
 
 // Global attack table for mobility calculation.
-static ATTACK_TABLE: Lazy<AttackTable> = Lazy::new(AttackTable::new);
+static ATTACK_TABLE: LazyLock<AttackTable> = LazyLock::new(AttackTable::new);
 
 // Mobility bonuses per square attacked (centipawns).
 // Index corresponds to number of attacked squares.

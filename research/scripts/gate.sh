@@ -69,6 +69,9 @@ bad=$(touched_protected "$baseline" "$candidate") \
 if [[ -n $bad ]]; then
   preflight_fail "touches protected paths: $(tr '\n' ' ' <<<"$bad")"
 fi
+weak=$(weakened_tests "$baseline" "$candidate") \
+  || preflight_fail "could not compute diff $b12..$c12 for the test-weakening check"
+[[ -z $weak ]] || preflight_fail "weakens the unit tests: $(tr '\n' ' ' <<<"$weak")"
 gate[preflight]=pass
 
 # --- 2-3. Local build, tests, perft (inside the candidate worktree). ---

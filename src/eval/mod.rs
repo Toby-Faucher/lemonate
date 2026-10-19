@@ -18,7 +18,6 @@ pub use pst::PieceSquareTableEval;
 pub use weights::EvalWeights;
 
 pub struct Evaluator {
-    material: MaterialEvaluator,
     pst: PieceSquareTableEval,
     phase: GamePhase,
     pawn_structure: PawnStructureEval,
@@ -29,7 +28,6 @@ pub struct Evaluator {
 impl Evaluator {
     pub fn new() -> Self {
         Self {
-            material: MaterialEvaluator::new(),
             pst: PieceSquareTableEval::new(),
             phase: GamePhase::new(),
             pawn_structure: PawnStructureEval::new(),

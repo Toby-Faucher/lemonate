@@ -260,7 +260,7 @@ function stats(m) {
   s.innerHTML =
     card("Current record", fmtVal(cur.value, m), `${commitLink(cur)} · ${fmtDate(cur.ts)}`) +
     card("Since the first measurement", ratio.toFixed(2) + "&times;", `${fmtVal(first.value, m)} &rarr; ${fmtVal(cur.value, m)}`) +
-    card("Records broken", recs.length, `${m.points.length} versions measured`) +
+    card("Records broken", Math.max(0, recs.length - 1), `${m.points.length} versions measured`) +
     (big ? card("Biggest single jump", gainText(big, m, 1), esc(big.subject.slice(0, 44))) : "") +
     (long ? card("Longest-standing record", Math.round(long.held_days) + " days", `${fmtVal(long.value, m)} · ${commitLink(long)}`) : "");
 }

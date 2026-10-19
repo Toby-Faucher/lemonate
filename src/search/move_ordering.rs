@@ -16,7 +16,7 @@ use crate::board::{Move, MoveType};
 use crate::magic::AttackTable;
 use crate::types::{Color, PieceType, Square};
 use crate::Board;
-use once_cell::sync::Lazy;
+use std::sync::LazyLock;
 
 use super::history::HistoryTable;
 use super::killer_moves::KILLERS_PER_PLY;
@@ -25,7 +25,7 @@ use super::killer_moves::KILLERS_PER_PLY;
 pub const MAX_MOVES: usize = 256;
 
 /// Lazy-initialized attack table for SEE calculations.
-static ATTACK_TABLE: Lazy<AttackTable> = Lazy::new(AttackTable::new);
+static ATTACK_TABLE: LazyLock<AttackTable> = LazyLock::new(AttackTable::new);
 
 /// Score constants for move ordering.
 pub mod scores {

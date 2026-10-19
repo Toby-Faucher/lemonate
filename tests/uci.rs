@@ -54,7 +54,16 @@ fn run_until(script: &str, marker: &str, count: usize) -> Vec<String> {
     let _ = stdin.write_all(b"quit\n");
     let _ = stdin.flush();
     drop(stdin);
-    let _ = child.wait();
+    // An engine that ignores `quit` must not hang the test run.
+    let exit_deadline = Instant::now() + Duration::from_secs(5);
+    while child.try_wait().ok().flatten().is_none() {
+        if Instant::now() > exit_deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
     lines
 }
 
@@ -63,6 +72,21 @@ fn bestmove(lines: &[String]) -> Option<&str> {
         .iter()
         .find(|l| l.starts_with("bestmove"))
         .and_then(|l| l.split_whitespace().nth(1))
+}
+
+#[test]
+fn depth_cap_does_not_remove_the_clock() {
+    // Depth 60 cannot finish in 200 ms: only the clock can end this search inside the 20 s window.
+    let started = Instant::now();
+    let out = run("position startpos\ngo depth 60 wtime 200 btime 200\n", 1);
+    assert!(bestmove(&out).is_some(), "no bestmove: {out:?}");
+    assert!(started.elapsed() < Duration::from_secs(10), "search ignored the clock");
+}
+
+#[test]
+fn a_command_that_replaces_a_search_still_gets_its_bestmove() {
+    let out = run("position startpos\ngo infinite\nposition startpos moves e2e4\n", 1);
+    assert!(bestmove(&out).is_some(), "the aborted go printed no bestmove: {out:?}");
 }
 
 #[test]

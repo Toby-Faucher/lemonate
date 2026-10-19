@@ -108,11 +108,6 @@ impl MagicRng {
     fn sparse(&mut self) -> u64 {
         self.next() & self.next() & self.next()
     }
-
-    // Less sparse than sparse(), more sparse than next()
-    fn semi_sparse(&mut self) -> u64 {
-        self.next() & self.next()
-    }
 }
 
 /// Search for a magic multiplier for `square` with the given occupancy `mask`.

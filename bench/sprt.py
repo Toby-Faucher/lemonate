@@ -52,6 +52,16 @@ RUNNERS = ("chess-test", "bawn")
 RUSTFLAGS = "-C target-cpu=x86-64-v3 -C target-feature=+bmi2,+popcnt"
 
 
+NAME_OK = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+
+
+def check_name(name):
+    """Match names become directory names, also on the remote inside `rm -rf`: no slashes, no `..`."""
+    if not NAME_OK.fullmatch(name) or ".." in name:
+        sys.exit(f"bad match name '{name}': use letters, digits, '.', '_' and '-' only")
+    return name
+
+
 def sh(*cmd, **kw):
     return subprocess.run(cmd, capture_output=True, text=True, **kw)
 
@@ -169,19 +179,22 @@ def start_local(args, name, base, cand, elo0, elo1, rounds):
         f"-v {RUNNER / 'cutechess-cli'}:/usr/local/bin/cutechess-cli:ro -v {rdir}:/out "
         f"{LOCAL_IMAGE} taskset -c {LOCAL_CPUS} nice -n 10 {inner}"
     )
-    script = (f"rm -rf {rdir}; mkdir -p {rdir}; cd {rdir}; "
+    script = (f"rm -rf {shlex.quote(str(rdir))}; mkdir -p {shlex.quote(str(rdir))}; cd {shlex.quote(str(rdir))}; "
               f"flock {LOCAL_LOCK} bash -c {shlex.quote(f'echo started=$(date +%s) > started; {podman} > log 2>&1')}; "
-              f"echo finished=$(date +%s) > finished")
+              f"rc=$?; echo finished=$(date +%s) rc=$rc > finished")
     subprocess.Popen(["setsid", "nohup", "bash", "-c", script], stdin=subprocess.DEVNULL,
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
     return str(rdir)
 
 
 def start(args):
+    check_name(args.name)
     WORK.mkdir(parents=True, exist_ok=True)
     meta_path = WORK / f"{args.name}.json"
     if meta_path.exists() and not args.force:
         sys.exit(f"{meta_path.name} exists; pick another name or --force")
+    if meta_path.exists():
+        cancel(argparse.Namespace(name=args.name))  # stop the old match before its directory is replaced
     base, cand = resolve(args.base), resolve(args.cand)
     runner = pick_runner(args.runner)
     print(f"building base {base[:12]} and candidate {cand[:12]} ... (runner: {runner})", flush=True)
@@ -205,9 +218,10 @@ def start(args):
     inner = match.replace(f"flock {LOCK} ", "", 1)
     # Start from an empty directory: a stale `started`/`finished` from an earlier run of the same
     # name would make a queued match look like it is running or done.
-    script = (f"rm -rf {rdir}; mkdir -p {rdir}; cd {rdir}; "
+    q = shlex.quote(rdir)
+    script = (f"rm -rf {q}; mkdir -p {q}; cd {q}; "
               f"flock {LOCK} bash -c 'echo started=$(date +%s) > started; {inner} > log 2>&1'; "
-              f"echo finished=$(date +%s) > finished")
+              f"rc=$?; echo finished=$(date +%s) rc=$rc > finished")
     # Detach fully so ssh returns at once; the match queues on the lock by itself.
     subprocess.run(["ssh", HOST, f"setsid nohup bash -c {shlex.quote(script)} >/dev/null 2>&1 < /dev/null &"], check=True)
     meta = {"name": args.name, "base": base, "cand": cand, "elo0": elo0, "elo1": elo1, "rounds": rounds,
@@ -254,16 +268,28 @@ def status_many(names):
         if n in local:
             continue
         d = m["dir"]
-        script += (f"echo '@@{n}'; cd {d} 2>/dev/null && (test -f finished && echo FINISHED || "
-                   f"(test -f started && echo RUNNING || echo QUEUED)); cat {d}/log 2>/dev/null; ")
+        # A finished file with a non-zero rc means cutechess (or the shell around it) died.
+        script += (f"echo '@@{n}'; cd {shlex.quote(d)} 2>/dev/null && (test -f finished && "
+                   f"(grep -q 'rc=[1-9]' finished && echo FAILED || echo FINISHED) || "
+                   f"(test -f started && echo RUNNING || echo QUEUED)); cat {shlex.quote(d)}/log 2>/dev/null; ")
     chunks = {}
     for n, m in local.items():
         d = Path(m["dir"])
-        state = "FINISHED" if (d / "finished").exists() else "RUNNING" if (d / "started").exists() else "QUEUED"
+        fin = d / "finished"
+        if fin.exists():
+            state = "FAILED" if re.search(r"rc=[1-9]", fin.read_text()) else "FINISHED"
+        else:
+            state = "RUNNING" if (d / "started").exists() else "QUEUED"
         log = (d / "log").read_text(errors="replace") if (d / "log").exists() else ""
         chunks[n] = f"{state}\n{log}"
     if script:
-        out = sh("ssh", HOST, script).stdout
+        r = sh("ssh", HOST, script)
+        if r.returncode:  # a down machine must not read as QUEUED
+            print(f"warning: ssh to {HOST} failed ({r.stderr.strip() or r.returncode})", file=sys.stderr)
+            for n, m in metas.items():
+                if n not in local:
+                    chunks[n] = "UNREACHABLE\n"
+        out = r.stdout
         parts = re.split(r"^@@(.+)$", out, flags=re.M)
         for i in range(1, len(parts) - 1, 2):
             chunks[parts[i]] = parts[i + 1].lstrip("\n")
@@ -276,7 +302,9 @@ def status_many(names):
         res = parse(log, metas[n])
         res.update({"name": n, "state": head.strip() or "QUEUED", "runner": metas[n].get("runner", "chess-test")})
         if res["state"] == "FINISHED" and not res["verdict"]:
-            res["verdict"] = "inconclusive (game cap reached)"
+            res["verdict"] = "inconclusive (game cap reached)" if res["games"] else "no games played"
+        if res["state"] == "FAILED" and not res["verdict"]:
+            res["verdict"] = "match process failed"
         results.append(res)
     return results
 
@@ -309,24 +337,31 @@ def status(args):
 
 
 def wait(args):
+    down = 0
     while True:
         res = status_one(args.name)
-        if res["state"] == "FINISHED":
+        if res["state"] in ("FINISHED", "FAILED"):
             print(fmt(res))
-            return
+            sys.exit(0 if res["state"] == "FINISHED" else 1)
+        down = down + 1 if res["state"] == "UNREACHABLE" else 0
+        if down >= 5:
+            sys.exit(f"{args.name}: match machine unreachable for 5 checks in a row")
         time.sleep(60)
 
 
 def record(args):
     """Write a finished match into research/experiments/ID in the format the gate produces,
     so research/scripts/catalog.sh can include it. hypothesis.md and trace.md are written by hand."""
+    check_name(args.name)
     meta_path = WORK / f"{args.name}.json"
     if not meta_path.exists():
         sys.exit(f"no such match: {args.name}")
     meta = json.loads(meta_path.read_text())
     res = status_one(args.name)
     if res["state"] != "FINISHED" and not args.stopped:
-        sys.exit(f"{args.name} has not finished ({res['state']}); use --stopped to record it as it stands")
+        sys.exit(f"{args.name} has not finished cleanly ({res['state']}); use --stopped to record it as it stands")
+    if not res["games"]:
+        sys.exit(f"{args.name} played no games; nothing to record")
     verdict = "" if args.stopped else (res["verdict"] or "")
     status = {"H1": "accepted", "H0": "rejected"}.get(verdict, "inconclusive")
     sprt = {
@@ -340,7 +375,8 @@ def record(args):
         "baseline_commit": meta["base"],
         "candidate_commit": meta["cand"],
         "config_hash": "bench-sprt",
-        "gate": {"preflight": "skipped", "build": "pass", "test": "pass", "perft": "pass",
+        # sprt.py builds both engines, so "build" is real; it does not run tests or perft.
+        "gate": {"preflight": "skipped", "build": "pass", "test": "skipped", "perft": "skipped",
                  "sprt": "pass" if verdict == "H1" else "fail"},
         "sprt": sprt,
         "status": status,
@@ -357,6 +393,7 @@ def record(args):
 
 
 def cancel(args):
+    check_name(args.name)
     meta_path = WORK / f"{args.name}.json"
     if not meta_path.exists():
         sys.exit(f"no such match: {args.name}")
@@ -370,7 +407,11 @@ def cancel(args):
         left = sh("pgrep", "-fc", pattern).stdout.strip() or "0"
     else:
         r = sh("ssh", HOST, f"pkill -f '{pattern}'; sleep 1; pgrep -f '{pattern}' | wc -l")
+        if r.returncode:
+            sys.exit(f"could not reach {HOST} to cancel '{args.name}' ({r.stderr.strip() or r.returncode}); it may still be running")
         left = r.stdout.strip()
+    if left not in ("0", ""):
+        sys.exit(f"'{args.name}' still has {left} processes after the kill; not marked cancelled")
     meta_path.rename(WORK / f"{args.name}.cancelled")
     print(f"cancelled '{args.name}' ({left} processes left)")
 

@@ -41,6 +41,16 @@ jobs:
       - name: Test (unit tests, debug profile)
         run: cargo test --lib
 
+  clippy:
+    name: clippy (report only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Not a gate yet: the existing warnings are being cleared after the open experiment branches land.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo clippy --all-targets
+
   bench-tooling:
     name: bench tooling
     runs-on: ubuntu-latest
@@ -48,7 +58,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Unit tests for the record logic
-        run: python3 bench/test_bench.py
+        run: |
+          python3 bench/test_bench.py
+          python3 bench/test_sprt.py
       - name: Research scripts
         run: |
           cd research/scripts/tests

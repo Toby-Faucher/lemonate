@@ -18,6 +18,21 @@ die() { echo "error: $*" >&2; exit 1; }
 
 cfg() { python3 "$SCRIPTS/cfg.py" get "$1"; }
 
+# weakened_tests BASE HEAD: print a line if the diff removes more `#[test]` functions or `assert`
+# lines from src/ than it adds, so an attempt cannot pass the gate by deleting the unit tests that
+# would catch its change. Tests live inside src/ files, so a path prefix cannot protect them.
+# Fails (non-zero) if git cannot compute the diff.
+weakened_tests() {
+  local d t_rm t_add a_rm a_add
+  d=$(git -C "$REPO_ROOT" diff --no-renames -U0 "$1" "$2" -- src) || return 1
+  t_rm=$(grep -c '^-[[:space:]]*#\[test\]' <<<"$d" || true)
+  t_add=$(grep -c '^+[[:space:]]*#\[test\]' <<<"$d" || true)
+  a_rm=$(grep -cE '^-[[:space:]]*(debug_)?assert(_eq|_ne)?!' <<<"$d" || true)
+  a_add=$(grep -cE '^\+[[:space:]]*(debug_)?assert(_eq|_ne)?!' <<<"$d" || true)
+  if (( t_rm > t_add )); then echo "removes $((t_rm - t_add)) #[test] function(s) from src/"; fi
+  if (( a_rm > a_add + 3 )); then echo "removes $((a_rm - a_add)) assert lines from src/"; fi
+}
+
 # touched_protected BASE HEAD: print changed paths under a protected prefix, one per line.
 # Fails (non-zero) if git cannot compute the diff, so callers can fail closed.
 touched_protected() {
