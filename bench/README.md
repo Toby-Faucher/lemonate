@@ -30,9 +30,17 @@ bench/sprt.py cancel NAME
 bench/sprt.py record NAME ID                     # write research/experiments/ID/{result,sprt}.json + patch.diff
 ```
 
-Engines are built in the pinned container with a portable target (`x86-64-v3`) and copied over, so
-nothing compiles on the match machine while a game is running. Matches queue on the same remote
-lock the gate uses, one at a time. `record` leaves `hypothesis.md` and `trace.md` to be written by
+Two machines can play matches, one match at a time each: `chess-test` (the container the gate uses)
+and the local machine, where cutechess runs in a small Debian container on threads 0-9 at low
+priority (the benchmark pins to cpu 14, so the two do not collide). `--runner auto`, the default,
+sends a match to whichever has fewer matches waiting or running; `--runner bawn|chess-test` forces
+one. The first local match fetches the cutechess binary and the opening book from `chess-test` and
+builds the runner image. Each result is fair on its own because both engines play on the same
+machine, but the two machines are different CPUs, so compare Elo between matches, not nps.
+
+Engines are built in the pinned container with a portable target (`x86-64-v3`) and, for
+`chess-test`, copied over, so nothing compiles on the match machine while a game is running.
+Remote matches queue on the same lock the gate uses. `record` leaves `hypothesis.md` and `trace.md` to be written by
 hand; then `research/scripts/catalog.sh` regenerates `CATALOG.md`. Unlike `gate.sh`, this does not
 check the diff against the protected paths or run the local test stages, so run the tests yourself.
 

@@ -2,12 +2,15 @@
 """Queue and watch SPRT matches on the chess-test container.
 
 Match settings (time control, book, concurrency, game cap, default bounds) come from
-research/config.toml, so results are comparable with the research gate. Engines are built
+research/config.toml, so results are comparable with the research gate. Two machines can run
+matches, one match at a time each: chess-test (the container the gate uses) and this machine
+(cutechess in a container, on spare cores, at low priority). `--runner auto` picks the shorter queue. Engines are built
 here in the pinned Rust container with a portable target (x86-64-v3) and copied over, so
 nothing compiles on the match machine while a match is running. Matches queue on the same
 remote lock the gate uses, one at a time.
 
-    sprt.py start NAME BASE CAND [--elo0 0] [--elo1 5] [--rounds N]   build, ship, queue
+    sprt.py start NAME BASE CAND [--elo0 0] [--elo1 5] [--rounds N] [--runner auto|bawn|chess-test]
+                                                                      build, ship, queue
     sprt.py status [NAME...]                                          score / LLR / verdict
     sprt.py wait NAME                                                 block until finished
     sprt.py cancel NAME                                               stop a queued or running match
@@ -35,6 +38,14 @@ RESEARCH = tomllib.loads((ROOT / "research" / "config.toml").read_text())
 BENCH_CFG = json.loads((BENCH / "config.json").read_text())
 HOST = RESEARCH["remote"]["host"]
 LOCK = RESEARCH["remote"]["lock"]
+# The local runner: cutechess-cli in a small Debian container, on threads 0-9 only (the
+# benchmark pins to cpu 14/15) and at low priority, because this machine also hosts services.
+RUNNER = WORK.parent / "runner"
+LOCAL_IMAGE = "lemonate-cutechess"
+LOCAL_LOCK = "/tmp/lemonate-sprt-local.lock"
+LOCAL_CPUS = "0-9"
+LOCAL_CONCURRENCY = 8
+RUNNERS = ("chess-test", "bawn")
 # Portable: the match machine is a different CPU from the build machine.
 RUSTFLAGS = "-C target-cpu=x86-64-v3 -C target-feature=+bmi2,+popcnt"
 
@@ -99,27 +110,95 @@ def ship(binary):
     return remote
 
 
+def cutechess_cmd(cand_path, base_path, book, pgn, concurrency, rounds, elo0, elo1):
+    m, s = RESEARCH["match"], RESEARCH["sprt"]
+    return (
+        f"cutechess-cli "
+        f"-engine name=new cmd={cand_path} proto=uci -engine name=old cmd={base_path} proto=uci "
+        f"-each tc={m['tc']} -games 2 -repeat -rounds {rounds} -concurrency {concurrency} "
+        f"-openings file={book} format=epd order=random "
+        f"-resign movecount=3 score=400 -draw movenumber=40 movecount=8 score=10 "
+        f"-sprt elo0={elo0} elo1={elo1} alpha={s['alpha']} beta={s['beta']} -pgnout {pgn}"
+    )
+
+
+def ensure_local_runner():
+    """The local runner needs the cutechess binary, the opening book and a small image."""
+    missing = [f for f in ("cutechess-cli", "UHO_Lichess_4852_v1.epd") if not (RUNNER / f).exists()]
+    if missing:
+        RUNNER.mkdir(parents=True, exist_ok=True)
+        for f, src in (("cutechess-cli", "/usr/local/bin/cutechess-cli"), ("UHO_Lichess_4852_v1.epd", RESEARCH["match"]["book"])):
+            if f in missing:
+                r = sh("scp", "-q", f"{HOST}:{src}", str(RUNNER / f))
+                if r.returncode:
+                    sys.exit(f"cannot fetch {f} from {HOST}: {r.stderr}")
+    if sh("podman", "image", "exists", LOCAL_IMAGE).returncode:
+        containerfile = ("FROM docker.io/library/debian:13-slim\n"
+                         "RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends "
+                         "libqt6core6t64 libstdc++6 util-linux >/dev/null 2>&1 && rm -rf /var/lib/apt/lists/*\n")
+        r = subprocess.run(["podman", "build", "-q", "-t", LOCAL_IMAGE, "-f", "-", str(RUNNER)],
+                           input=containerfile, capture_output=True, text=True)
+        if r.returncode:
+            sys.exit(f"cannot build the runner image: {r.stderr}")
+
+
+def pick_runner(requested):
+    if requested in RUNNERS:
+        return requested
+    # auto: the machine with fewer matches still waiting or running
+    load = {r: 0 for r in RUNNERS}
+    names = [p.stem for p in WORK.glob("*.json")]
+    for res in status_many(names):
+        if res["state"] in ("QUEUED", "RUNNING"):
+            meta = json.loads((WORK / f"{res['name']}.json").read_text())
+            load[meta.get("runner", "chess-test")] += 1
+    return min(RUNNERS, key=lambda r: (load[r], RUNNERS.index(r)))
+
+
+def start_local(args, name, base, cand, elo0, elo1, rounds):
+    ensure_local_runner()
+    rdir = WORK / name
+    b_name, c_name = f"lemonate-{base[:12]}", f"lemonate-{cand[:12]}"
+    inner = cutechess_cmd(f"/engines/{c_name}", f"/engines/{b_name}", "/book.epd", "/out/games.pgn",
+                          LOCAL_CONCURRENCY, rounds, elo0, elo1)
+    podman = (
+        f"podman run --rm --name sprt-{name} -e LANG=C.UTF-8 "
+        f"-v {WORK / 'bin'}:/engines:ro -v {RUNNER / 'UHO_Lichess_4852_v1.epd'}:/book.epd:ro "
+        f"-v {RUNNER / 'cutechess-cli'}:/usr/local/bin/cutechess-cli:ro -v {rdir}:/out "
+        f"{LOCAL_IMAGE} taskset -c {LOCAL_CPUS} nice -n 10 {inner}"
+    )
+    script = (f"rm -rf {rdir}; mkdir -p {rdir}; cd {rdir}; "
+              f"flock {LOCAL_LOCK} bash -c {shlex.quote(f'echo started=$(date +%s) > started; {podman} > log 2>&1')}; "
+              f"echo finished=$(date +%s) > finished")
+    subprocess.Popen(["setsid", "nohup", "bash", "-c", script], stdin=subprocess.DEVNULL,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    return str(rdir)
+
+
 def start(args):
     WORK.mkdir(parents=True, exist_ok=True)
     meta_path = WORK / f"{args.name}.json"
     if meta_path.exists() and not args.force:
         sys.exit(f"{meta_path.name} exists; pick another name or --force")
     base, cand = resolve(args.base), resolve(args.cand)
-    print(f"building base {base[:12]} and candidate {cand[:12]} ...", flush=True)
-    b_remote, c_remote = ship(build(base)), ship(build(cand))
+    runner = pick_runner(args.runner)
+    print(f"building base {base[:12]} and candidate {cand[:12]} ... (runner: {runner})", flush=True)
+    b_bin, c_bin = build(base), build(cand)
     m, s = RESEARCH["match"], RESEARCH["sprt"]
     elo0 = args.elo0 if args.elo0 is not None else s["elo0"]
     elo1 = args.elo1 if args.elo1 is not None else s["elo1"]
     rounds = args.rounds or m["game_cap"] // 2
+    if runner == "bawn":
+        rdir = start_local(args, args.name, base, cand, elo0, elo1, rounds)
+        meta = {"name": args.name, "base": base, "cand": cand, "elo0": elo0, "elo1": elo1, "rounds": rounds,
+                "queued": int(time.time()), "dir": rdir, "runner": "bawn"}
+        meta_path.write_text(json.dumps(meta, indent=2))
+        print(f"queued '{args.name}' on {runner}: {base[:7]} -> {cand[:7]}  bounds [{elo0}, {elo1}]  up to {rounds * 2} games")
+        return
+    b_remote, c_remote = ship(b_bin), ship(c_bin)
     rdir = f"/root/sprt/{args.name}"
-    match = (
-        f"flock {LOCK} cutechess-cli "
-        f"-engine name=new cmd={c_remote} proto=uci -engine name=old cmd={b_remote} proto=uci "
-        f"-each tc={m['tc']} -games 2 -repeat -rounds {rounds} -concurrency {m['concurrency']} "
-        f"-openings file={m['book']} format=epd order=random "
-        f"-resign movecount=3 score=400 -draw movenumber=40 movecount=8 score=10 "
-        f"-sprt elo0={elo0} elo1={elo1} alpha={s['alpha']} beta={s['beta']} -pgnout {rdir}/games.pgn"
-    )
+    match = f"flock {LOCK} " + cutechess_cmd(c_remote, b_remote, m["book"], f"{rdir}/games.pgn",
+                                             m["concurrency"], rounds, elo0, elo1)
     # `started` is written only once the lock is held, so a match still waiting its turn reads as queued.
     inner = match.replace(f"flock {LOCK} ", "", 1)
     # Start from an empty directory: a stale `started`/`finished` from an earlier run of the same
@@ -130,9 +209,9 @@ def start(args):
     # Detach fully so ssh returns at once; the match queues on the lock by itself.
     subprocess.run(["ssh", HOST, f"setsid nohup bash -c {shlex.quote(script)} >/dev/null 2>&1 < /dev/null &"], check=True)
     meta = {"name": args.name, "base": base, "cand": cand, "elo0": elo0, "elo1": elo1, "rounds": rounds,
-            "queued": int(time.time()), "dir": rdir}
+            "queued": int(time.time()), "dir": rdir, "runner": "chess-test"}
     meta_path.write_text(json.dumps(meta, indent=2))
-    print(f"queued '{args.name}' {base[:7]} -> {cand[:7]}  bounds [{elo0}, {elo1}]  up to {rounds * 2} games")
+    print(f"queued '{args.name}' on {runner}: {base[:7]} -> {cand[:7]}  bounds [{elo0}, {elo1}]  up to {rounds * 2} games")
 
 
 def parse(log, meta):
@@ -167,12 +246,20 @@ def status_many(names):
         if mp.exists():
             metas[n] = json.loads(mp.read_text())
     script = ""
+    local = {n: m for n, m in metas.items() if m.get("runner") == "bawn"}
     for n, m in metas.items():
+        if n in local:
+            continue
         d = m["dir"]
         script += (f"echo '@@{n}'; cd {d} 2>/dev/null && (test -f finished && echo FINISHED || "
                    f"(test -f started && echo RUNNING || echo QUEUED)); cat {d}/log 2>/dev/null; ")
     chunks = {}
-    if metas:
+    for n, m in local.items():
+        d = Path(m["dir"])
+        state = "FINISHED" if (d / "finished").exists() else "RUNNING" if (d / "started").exists() else "QUEUED"
+        log = (d / "log").read_text(errors="replace") if (d / "log").exists() else ""
+        chunks[n] = f"{state}\n{log}"
+    if script:
         out = sh("ssh", HOST, script).stdout
         parts = re.split(r"^@@(.+)$", out, flags=re.M)
         for i in range(1, len(parts) - 1, 2):
@@ -184,7 +271,7 @@ def status_many(names):
             continue
         head, _, log = chunks.get(n, "").partition("\n")
         res = parse(log, metas[n])
-        res.update({"name": n, "state": head.strip() or "QUEUED"})
+        res.update({"name": n, "state": head.strip() or "QUEUED", "runner": metas[n].get("runner", "chess-test")})
         if res["state"] == "FINISHED" and not res["verdict"]:
             res["verdict"] = "inconclusive (game cap reached)"
         results.append(res)
@@ -198,7 +285,7 @@ def status_one(name):
 def fmt(res):
     if res["state"] == "unknown":
         return f"{res['name']}: unknown"
-    line = f"{res['name']:<22} {res['state']:<9} {res['games']:>5} games  {res['w']}-{res['l']}-{res['d']}"
+    line = f"{res['name']:<24} {res.get('runner', ''):<10} {res['state']:<9} {res['games']:>5} games  {res['w']}-{res['l']}-{res['d']}"
     if res.get("elo") is not None:
         line += f"  Elo {res['elo']:+.1f} +/- {res.get('err', 0):.1f}"
     elif res.get("elo_est") is not None:
@@ -269,9 +356,16 @@ def cancel(args):
     if not meta_path.exists():
         sys.exit(f"no such match: {args.name}")
     # Every process of the match (waiting shell, flock, cutechess) carries its directory name.
+    meta = json.loads(meta_path.read_text())
     pattern = f"sprt/{args.name}[/ ;]"
-    r = sh("ssh", HOST, f"pkill -f '{pattern}'; sleep 1; pgrep -f '{pattern}' | wc -l")
-    left = r.stdout.strip()
+    if meta.get("runner") == "bawn":
+        sh("pkill", "-f", pattern)
+        sh("podman", "kill", f"sprt-{args.name}")
+        time.sleep(1)
+        left = sh("pgrep", "-fc", pattern).stdout.strip() or "0"
+    else:
+        r = sh("ssh", HOST, f"pkill -f '{pattern}'; sleep 1; pgrep -f '{pattern}' | wc -l")
+        left = r.stdout.strip()
     meta_path.rename(WORK / f"{args.name}.cancelled")
     print(f"cancelled '{args.name}' ({left} processes left)")
 
@@ -284,6 +378,8 @@ def main():
     s.add_argument("--elo0", type=float), s.add_argument("--elo1", type=float)
     s.add_argument("--rounds", type=int, help="game pairs (default: game_cap / 2)")
     s.add_argument("--force", action="store_true")
+    s.add_argument("--runner", choices=("auto",) + RUNNERS, default="auto",
+                   help="which machine plays the match (auto: the one with the shorter queue)")
     s.set_defaults(fn=start)
     s = sub.add_parser("status")
     s.add_argument("names", nargs="*")
