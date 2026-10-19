@@ -1,0 +1,177 @@
+diff --git a/src/search/mod.rs b/src/search/mod.rs
+index 222bd3e..8b6fcd3 100644
+--- a/src/search/mod.rs
++++ b/src/search/mod.rs
+@@ -304,6 +304,20 @@ impl SearchEngine {
+         }
+     }
+ 
++    /// Store a quiescence result in the active table (see `store_qs`). Mate-range scores are
++    /// skipped: quiescence does not track mate distance.
++    #[inline]
++    fn tt_store_qs(&mut self, hash: u64, score: i32, entry_type: EntryType) {
++        if score.abs() >= MATE_SCORE - MAX_DEPTH as i32 {
++            return;
++        }
++        if let Some(shared) = &self.shared {
++            shared.store_qs(hash, score, entry_type);
++        } else {
++            self.tt.store_qs(hash, score, entry_type);
++        }
++    }
++
+     /// Bump the age of the active transposition table.
+     fn tt_new_search(&mut self) {
+         if let Some(shared) = &self.shared {
+@@ -938,6 +952,15 @@ impl SearchEngine {
+             return 0;
+         }
+ 
++        // The same position is reached by many capture orders; reuse earlier results.
++        let hash = board.position_hash();
++        let original_alpha = alpha;
++        if let Some(entry) = self.tt_probe(hash) {
++            if let Some(score) = entry.get_score(alpha, beta) {
++                return TranspositionTable::adjust_score_for_retrieval(score, ply);
++            }
++        }
++
+         // Stand pat - if we're not in check, we can assume we can at least
+         // achieve the static evaluation by not making any captures.
+         let in_check = board.is_in_check();
+@@ -945,6 +968,7 @@ impl SearchEngine {
+ 
+         if !in_check {
+             if stand_pat >= beta {
++                self.tt_store_qs(hash, beta, EntryType::LowerBound);
+                 return beta;
+             }
+             if stand_pat > alpha {
+@@ -1042,6 +1066,7 @@ impl SearchEngine {
+             board.undo_move(mv, undo);
+ 
+             if score >= beta {
++                self.tt_store_qs(hash, beta, EntryType::LowerBound);
+                 return beta;
+             }
+             if score > alpha {
+@@ -1049,6 +1074,12 @@ impl SearchEngine {
+             }
+         }
+ 
++        let entry_type = if alpha > original_alpha {
++            EntryType::Exact
++        } else {
++            EntryType::UpperBound
++        };
++        self.tt_store_qs(hash, alpha, entry_type);
+         alpha
+     }
+ 
+diff --git a/src/search/transposition.rs b/src/search/transposition.rs
+index 5820d19..c3ec867 100644
+--- a/src/search/transposition.rs
++++ b/src/search/transposition.rs
+@@ -237,6 +237,23 @@ impl TranspositionTable {
+         }
+     }
+ 
++    /// Store a quiescence result (depth 0) without evicting search results.
++    ///
++    /// Quiescence nodes vastly outnumber interior nodes. With the table's "always replace on a
++    /// collision" rule they would wipe out the deeper entries the main search relies on, so a
++    /// quiescence entry only takes a slot that is empty, stale, or itself depth 0.
++    pub fn store_qs(&mut self, hash: u64, score: i32, entry_type: EntryType) {
++        let index = self.index(hash);
++        let existing = &self.entries[index];
++        let should_replace =
++            existing.is_empty() || existing.age != self.current_age || existing.depth == 0;
++        if should_replace {
++            let best_move = if existing.hash == hash { existing.best_move } else { None };
++            self.entries[index] =
++                TranspositionEntry::new(hash, score, 0, entry_type, best_move, self.current_age);
++        }
++    }
++
+     /// Adjust mate scores for storage.
+     ///
+     /// Mate scores are stored as "mate in N plies from this position"
+@@ -543,6 +560,27 @@ impl SharedTT {
+         }
+     }
+ 
++    /// Quiescence counterpart of [`TranspositionTable::store_qs`].
++    pub fn store_qs(&self, hash: u64, score: i32, entry_type: EntryType) {
++        let index = self.index(hash);
++        let slot = &self.entries[index];
++        let current_age = self.age.load(Ordering::Acquire);
++
++        let locked = slot.lock();
++        // SAFETY: slot locked for writing.
++        let existing: TranspositionEntry = unsafe { std::ptr::read_volatile(slot.data.get()) };
++        let should_replace =
++            existing.is_empty() || existing.age != current_age || existing.depth == 0;
++        if should_replace {
++            let best_move = if existing.hash == hash { existing.best_move } else { None };
++            let entry = TranspositionEntry::new(hash, score, 0, entry_type, best_move, current_age);
++            // SAFETY: slot locked for writing.
++            unsafe { slot.publish(locked, entry) };
++        } else {
++            slot.unlock(locked);
++        }
++    }
++
+     /// Get the hash table usage permille (0-1000), sampling the first
+     /// 1000 entries like [`TranspositionTable::hashfull`].
+     pub fn hashfull(&self) -> u16 {
+@@ -706,6 +744,50 @@ mod tests {
+         assert_eq!(entry.score, 100);
+     }
+ 
++    #[test]
++    fn test_store_qs_does_not_evict_deeper_entries() {
++        let mut tt = TranspositionTable::new(1);
++        let deep: u64 = 0x1234_5678_9ABC_DEF0;
++        // Same slot (the mask only looks at the low bits), different position.
++        let other: u64 = deep ^ ((tt.len() as u64) << 8);
++        assert_eq!(tt.index(deep), tt.index(other));
++
++        tt.store(deep, 100, 6, EntryType::Exact, None);
++        tt.store_qs(other, 7, EntryType::Exact);
++        let kept = tt.probe(deep).expect("deep entry must survive a quiescence store");
++        assert_eq!((kept.score, kept.depth), (100, 6));
++        assert!(tt.probe(other).is_none());
++    }
++
++    #[test]
++    fn test_store_qs_replaces_empty_stale_and_shallow_slots() {
++        let mut tt = TranspositionTable::new(1);
++        let a: u64 = 0x1234_5678_9ABC_DEF0;
++        let b: u64 = a ^ ((tt.len() as u64) << 8);
++
++        tt.store_qs(a, 5, EntryType::Exact); // empty slot
++        assert_eq!(tt.probe(a).unwrap().depth, 0);
++        tt.store_qs(b, 9, EntryType::UpperBound); // slot holds a depth-0 entry
++        assert_eq!(tt.probe(b).unwrap().score, 9);
++
++        tt.store(a, 100, 6, EntryType::Exact, None); // deep entry, then a new search starts
++        tt.new_search();
++        tt.store_qs(b, 11, EntryType::Exact); // stale entries may be taken over
++        assert_eq!(tt.probe(b).unwrap().score, 11);
++    }
++
++    #[test]
++    fn test_store_qs_keeps_the_existing_best_move_for_the_same_position() {
++        let mut tt = TranspositionTable::new(1);
++        let h: u64 = 0xABCD_EF01_2345_6789;
++        let mv = make_test_move();
++        tt.store(h, 40, 0, EntryType::Exact, Some(mv));
++        tt.store_qs(h, 55, EntryType::Exact);
++        let e = tt.probe(h).unwrap();
++        assert_eq!(e.score, 55);
++        assert_eq!(e.best_move, Some(mv));
++    }
++
+     #[test]
+     fn test_mate_score_adjustment() {
+         // Mate in 5 from root, currently at ply 2.

@@ -1,0 +1,24 @@
+{
+  "baseline_commit": "8a0e1ed8f24699e456634824265b94981cb69722",
+  "candidate_commit": "b80981cdfc70cc95348b4769a1761e4947fb0eb0",
+  "config_hash": "bench-sprt",
+  "gate": {
+    "preflight": "skipped",
+    "build": "pass",
+    "test": "pass",
+    "perft": "pass",
+    "sprt": "pass"
+  },
+  "sprt": {
+    "games": 1715,
+    "wins": 656,
+    "losses": 505,
+    "draws": 554,
+    "elo": 30.7,
+    "elo_err": 13.5,
+    "llr": 2.96,
+    "verdict": "H1"
+  },
+  "status": "accepted",
+  "reason": "SPRT [0, 5] vs PVS branch via bench/sprt.py"
+}
