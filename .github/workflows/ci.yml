@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A newer push to the same pull request makes an older run pointless.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    name: build and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: rustc --version && cargo --version
+      # Release mode: the search tests and perft are far too slow in debug.
+      # No target-cpu flags here: the runner's CPU is not the one the engine is tuned for.
+      - name: Test (unit, perft, end-to-end UCI)
+        run: cargo test --release
+      - name: Build both binaries
+        run: cargo build --release --bins
+
+  bench-tooling:
+    name: bench tooling
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Unit tests for the record logic
+        run: python3 bench/test_bench.py
+      - name: Scripts parse
+        run: python3 -m py_compile bench/*.py research/scripts/*.py
