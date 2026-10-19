@@ -212,4 +212,19 @@ git -C "$repo/.worktrees/0021-own" commit -qam "own change"
 gate_h1 0021-own
 assert_eq "$(status_of 0021-own)" "accepted" "own linear commit with moved main -> accepted"
 
+# weakened_tests: deleting a #[test] from src/ is caught, adding one is not.
+(
+  source "$R/scripts/lib.sh"
+  REPO_ROOT="$repo"
+  git -C "$repo" checkout -qb weak-test main
+  mkdir -p "$repo/src"
+  printf '#[test]\nfn a() {}\n#[test]\nfn b() {}\n' > "$repo/src/t.rs"
+  git -C "$repo" add src/t.rs && git -C "$repo" commit -qm "tests"
+  printf '#[test]\nfn a() {}\n' > "$repo/src/t.rs"
+  git -C "$repo" commit -qam "drop a test"
+  [[ -n $(weakened_tests HEAD~1 HEAD) ]] || fail "removed #[test] not detected"
+  [[ -z $(weakened_tests HEAD HEAD~1) ]] || fail "added #[test] flagged"
+  git -C "$repo" checkout -q main
+)
+
 echo "test_gate: OK"

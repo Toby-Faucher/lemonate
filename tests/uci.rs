@@ -54,7 +54,16 @@ fn run_until(script: &str, marker: &str, count: usize) -> Vec<String> {
     let _ = stdin.write_all(b"quit\n");
     let _ = stdin.flush();
     drop(stdin);
-    let _ = child.wait();
+    // An engine that ignores `quit` must not hang the test run.
+    let exit_deadline = Instant::now() + Duration::from_secs(5);
+    while child.try_wait().ok().flatten().is_none() {
+        if Instant::now() > exit_deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
     lines
 }
 
@@ -63,6 +72,21 @@ fn bestmove(lines: &[String]) -> Option<&str> {
         .iter()
         .find(|l| l.starts_with("bestmove"))
         .and_then(|l| l.split_whitespace().nth(1))
+}
+
+#[test]
+fn depth_cap_does_not_remove_the_clock() {
+    // Depth 60 cannot finish in 200 ms: only the clock can end this search inside the 20 s window.
+    let started = Instant::now();
+    let out = run("position startpos\ngo depth 60 wtime 200 btime 200\n", 1);
+    assert!(bestmove(&out).is_some(), "no bestmove: {out:?}");
+    assert!(started.elapsed() < Duration::from_secs(10), "search ignored the clock");
+}
+
+#[test]
+fn a_command_that_replaces_a_search_still_gets_its_bestmove() {
+    let out = run("position startpos\ngo infinite\nposition startpos moves e2e4\n", 1);
+    assert!(bestmove(&out).is_some(), "the aborted go printed no bestmove: {out:?}");
 }
 
 #[test]
@@ -345,4 +369,33 @@ fn the_new_options_are_advertised() {
     let out = run_until("uci\n", "uciok", 1);
     assert!(out.iter().any(|l| l == "option name Move Overhead type spin default 10 min 0 max 5000"), "{out:?}");
     assert!(out.iter().any(|l| l == "option name Clear Hash type button"), "{out:?}");
+}
+
+/// Run the engine on `script` (raw bytes) and close stdin straight away, like a piped script.
+fn run_piped(script: &[u8]) -> String {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_lemonate"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn engine");
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(script).unwrap();
+    drop(stdin);
+    let out = child.wait_with_output().expect("engine output");
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+#[test]
+fn a_piped_search_still_reports_its_bestmove_at_eof() {
+    let out = run_piped(b"position startpos\ngo depth 6\n");
+    assert!(out.lines().any(|l| l.starts_with("bestmove ")), "no bestmove in:\n{out}");
+}
+
+#[test]
+fn a_line_that_is_not_utf8_does_not_end_the_engine() {
+    // 0xE9 is Latin-1 'e-acute' and not valid UTF-8 on its own.
+    let out = run_piped(b"setoption name BookFile value /tmp/caf\xe9.bin\nisready\nposition startpos\ngo depth 4\n");
+    assert!(out.contains("readyok"), "engine quit early:\n{out}");
+    assert!(out.lines().any(|l| l.starts_with("bestmove ")), "no bestmove in:\n{out}");
 }

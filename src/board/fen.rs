@@ -1,9 +1,12 @@
+use crate::types::piece::PieceType;
 use crate::{Board, CastlingRights, Color, FenError, Piece, Square};
 use super::zobrist::{zobrist_en_passant_hash, zobrist_side_to_move_hash};
 impl Board {
     pub fn from_fen(fen: &str) -> Result<Self, FenError> {
         let parts: Vec<&str> = fen.split_whitespace().collect();
-        if parts.len() != 6 {
+        // The halfmove clock and fullmove number are optional: EPD-style records and many
+        // book and puzzle files stop after the en passant field.
+        if parts.len() != 4 && parts.len() != 6 {
             return Err(FenError::InvalidFormat);
         }
 
@@ -25,8 +28,33 @@ impl Board {
             Some(Square::from_algebraic(parts[3])?)
         };
 
-        board.halfmove_clock = parts[4].parse().map_err(|_| FenError::InvalidHalfMove)?;
-        board.fullmove_number = parts[5].parse().map_err(|_| FenError::InvalidFullMove)?;
+        if parts.len() == 6 {
+            board.halfmove_clock = parts[4].parse().map_err(|_| FenError::InvalidHalfMove)?;
+            board.fullmove_number = parts[5].parse().map_err(|_| FenError::InvalidFullMove)?;
+        } else {
+            board.halfmove_clock = 0;
+            board.fullmove_number = 1;
+        }
+
+        // An en passant square only means something when the pawn that just made the double
+        // step is really behind it. Move generation trusts the field, so a bogus square would
+        // let a pawn "capture" a pawn that is not there and corrupt the board on unmake.
+        if let Some(ep) = board.en_passant_square {
+            let (ep_rank, behind, pawn_color) = match board.side_to_move {
+                Color::White => (5, ep.index().wrapping_sub(8), Color::Black),
+                Color::Black => (2, ep.index() + 8, Color::White),
+            };
+            let valid = ep.rank() == ep_rank
+                && board.piece_at(ep).is_none()
+                && behind < 64
+                && matches!(
+                    board.piece_at(Square::from_index(behind)),
+                    Some(Piece { piece_type: PieceType::Pawn, color }) if color == pawn_color
+                );
+            if !valid {
+                board.en_passant_square = None;
+            }
+        }
 
         // Fold side-to-move, castling rights, and en passant square into the
         // Zobrist hash so positions differing only in these fields hash
@@ -83,6 +111,28 @@ impl Board {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fen_without_move_counters_is_accepted() {
+        let board = Board::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -").unwrap();
+        assert_eq!(board.halfmove_clock(), 0);
+        assert!(Board::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0").is_err());
+        assert!(Board::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w").is_err());
+    }
+
+    #[test]
+    fn en_passant_square_without_a_pawn_behind_it_is_dropped() {
+        // Black pawn on d4, but no white pawn on e4: e3 cannot be a real en passant target.
+        let bogus = Board::from_fen("4k3/8/8/8/3p4/8/8/4K3 b - e3 0 1").unwrap();
+        let plain = Board::from_fen("4k3/8/8/8/3p4/8/8/4K3 b - - 0 1").unwrap();
+        assert_eq!(bogus.position_hash, plain.position_hash);
+        // Wrong rank for the side to move.
+        let wrong_rank = Board::from_fen("4k3/8/8/8/3pP3/8/8/4K3 b - e6 0 1").unwrap();
+        assert_eq!(wrong_rank.position_hash, Board::from_fen("4k3/8/8/8/3pP3/8/8/4K3 b - - 0 1").unwrap().position_hash);
+        // A genuine square survives.
+        let real = Board::from_fen("4k3/8/8/8/3pP3/8/8/4K3 b - e3 0 1").unwrap();
+        assert_ne!(real.position_hash, Board::from_fen("4k3/8/8/8/3pP3/8/8/4K3 b - - 0 1").unwrap().position_hash);
+    }
 
     #[test]
     fn test_fen_hash_distinguishes_side_to_move() {

@@ -116,6 +116,15 @@ def resolve(rev):
 def ensure_dirs():
     for d in ("bin", "src", "logs"):
         (WORK / d).mkdir(parents=True, exist_ok=True)
+    # Binaries are cached by source hash only, so a changed image or rustflags would silently reuse
+    # binaries built the old way and mix two build settings in one history.
+    stamp = WORK / "bin" / ".buildenv"
+    env = hashlib.sha1(f"{CONFIG['image']}\n{CONFIG['rustflags']}".encode()).hexdigest()
+    if not stamp.exists():
+        stamp.write_text(env)
+    elif stamp.read_text() != env:
+        sys.exit(f"build image or rustflags changed since {WORK / 'bin'} was filled; "
+                 f"delete that folder (and bench/anchor.json) to rebuild with the new settings")
 
 
 def bin_path(sh):
@@ -479,6 +488,16 @@ def anchor_load():
     return json.loads(ANCHOR.read_text()) if ANCHOR.exists() else None
 
 
+def normalise(m, drift):
+    """Add the drift-corrected fields to a measurement. `drift` > 1 means the machine is faster
+    now than when the anchor was calibrated, so raw times are too short and raw nps too high:
+    scale both back to the calibration machine."""
+    m["ttd_light_norm_ms"] = round(m["ttd_light_ms"] * drift, 2)
+    if m.get("ttd_ms"):
+        m["ttd_norm_ms"] = round(m["ttd_ms"] * drift, 2)
+    m["nps_norm"] = round(m["nps"] / drift)
+
+
 def measure_anchor(sh):
     """Re-time the anchor binary to correct for machine drift between sessions."""
     a = anchor_load()
@@ -486,9 +505,11 @@ def measure_anchor(sh):
         return 1.0
     p = bin_path(a["srchash"])
     if not p.exists():
+        print(f"warning: anchor binary {a['srchash']} is missing; rows are not drift-corrected", file=sys.stderr)
         return 1.0
     m = measure_binary(p)
     if m["status"] != "ok" or not m.get("ttd_ms"):
+        print(f"warning: anchor measurement failed ({m.get('status')}); rows are not drift-corrected", file=sys.stderr)
         return 1.0
     return a["ttd_ms"] / m["ttd_ms"]  # >1 means the machine is currently faster than at calibration
 
@@ -529,10 +550,7 @@ def measure_rows(entries, anchor_every=8):
         since_anchor += 1
         set_anchor(sh, m)
         if m["status"] == "ok":
-            m["ttd_light_norm_ms"] = round(m["ttd_light_ms"] / drift, 2)
-            if m.get("ttd_ms"):
-                m["ttd_norm_ms"] = round(m["ttd_ms"] / drift, 2)
-            m["nps_norm"] = round(m["nps"] * drift)
+            normalise(m, drift)
         row = {**base, **m, "env": {**env, "drift": round(drift, 4)}}
         append_history(row)
         done_by_sh[sh] = row
@@ -582,6 +600,8 @@ def cmd_run(args):
             line = git("log", "-1", "--format=%at%x1f%an%x1f%s", c).strip().split("\x1f")
             e = {"commit": c, "short": c[:7], "ts": int(line[0]), "author": line[1], "subject": line[2],
                  "srchash": src_hash(c), "force": args.force}
+            if args.force:  # --force also retries a build that failed before
+                fail_path(e["srchash"]).unlink(missing_ok=True)
             jobs.append((e["srchash"], c, None))
         entries.append(e)
     build_many(jobs)

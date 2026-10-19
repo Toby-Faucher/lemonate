@@ -243,6 +243,10 @@ def collect(args):
             print(f"{label}: finished but no scores in the log")
             continue
         rating, err, games = fit
+        short = [a for a in ANCHORS if sum(results.get(a, (0, 0, 0))) < ROUNDS * 2]
+        if short:
+            print(f"{label}: finished but incomplete (anchors short of {ROUNDS * 2} games: {short}); not recorded.")
+            continue
         if saturated(rating):
             print(f"{label}: outside the anchor range (lost or won every game); not recorded. Add anchors.")
             continue

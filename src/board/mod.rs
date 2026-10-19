@@ -67,6 +67,8 @@ impl Board {
 
     #[inline(always)]
     pub fn piece_at(&self, square: Square) -> Option<Piece> {
+        debug_assert!(square.index() < 64, "square index out of range: {}", square.index());
+        // SAFETY: every Square is built from a board index 0..64 (checked above in debug builds).
         unsafe { *self.mailbox.get_unchecked(square.index()) }
     }
 

@@ -260,7 +260,7 @@ function stats(m) {
   s.innerHTML =
     card("Current record", fmtVal(cur.value, m), `${commitLink(cur)} · ${fmtDate(cur.ts)}`) +
     card("Since the first measurement", ratio.toFixed(2) + "&times;", `${fmtVal(first.value, m)} &rarr; ${fmtVal(cur.value, m)}`) +
-    card("Records broken", recs.length, `${m.points.length} versions measured`) +
+    card("Records broken", Math.max(0, recs.length - 1), `${m.points.length} versions measured`) +
     (big ? card("Biggest single jump", gainText(big, m, 1), esc(big.subject.slice(0, 44))) : "") +
     (long ? card("Longest-standing record", Math.round(long.held_days) + " days", `${fmtVal(long.value, m)} · ${commitLink(long)}`) : "");
 }
@@ -376,7 +376,7 @@ function sprtTable() {
   if (!rows.length) { t.innerHTML = '<tr><td class="empty">No head-to-head results yet.</td></tr>'; return; }
   let h = '<tr><th>Experiment</th><th>Commit</th><th class="num">Games</th><th class="num">Elo</th><th>Verdict</th></tr>';
   rows.forEach((r) => {
-    const elo = r.elo == null ? "\u2013" : `${r.elo > 0 ? "+" : ""}${r.elo.toFixed(0)} \u00b1 ${r.elo_err.toFixed(0)}`;
+    const elo = r.elo == null ? "\u2013" : `${r.elo > 0 ? "+" : ""}${r.elo.toFixed(0)}${r.elo_err == null ? "" : " \u00b1 " + r.elo_err.toFixed(0)}`;
     const ok = r.verdict === "H1", cls = ok ? "good" : "";
     const word = ok ? "better" : r.verdict === "H0" ? "no gain" : "inconclusive";
     h += `<tr><td>${esc(r.name)}</td><td class="mono">${esc(r.baseline)} &rarr; ${esc(r.candidate)}</td><td class="num mono">${r.games}</td>` +

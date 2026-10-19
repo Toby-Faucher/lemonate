@@ -116,7 +116,7 @@ pub fn parse_command(line: &str) -> UciCommand {
             UciCommand::Debug(on)
         }
         Some("isready") => UciCommand::IsReady,
-        Some("setoption") => parse_setoption(&mut tokens),
+        Some("setoption") => parse_setoption(line),
         Some("register") => UciCommand::Register,
         Some("ucinewgame") => UciCommand::UciNewGame,
         Some("position") => parse_position(&mut tokens),
@@ -128,33 +128,27 @@ pub fn parse_command(line: &str) -> UciCommand {
     }
 }
 
-/// Parse "setoption name <name> [value <value>]".
-fn parse_setoption<'a>(tokens: &mut impl Iterator<Item = &'a str>) -> UciCommand {
-    let mut name_parts = Vec::new();
-    let mut value_parts = Vec::new();
-    let mut in_value = false;
-
-    // Skip "name" token.
-    if tokens.next() != Some("name") {
-        return UciCommand::Unknown("setoption: missing 'name'".to_string());
-    }
-
-    for token in tokens {
-        if token == "value" {
-            in_value = true;
-        } else if in_value {
-            value_parts.push(token);
-        } else {
-            name_parts.push(token);
-        }
-    }
-
-    let name = name_parts.join(" ");
-    let value = if value_parts.is_empty() {
-        None
-    } else {
-        Some(value_parts.join(" "))
+/// Parse "setoption name <name> [value <value>]" from the whole line.
+///
+/// The value is cut from the original text, not rebuilt from tokens, so a path with repeated
+/// spaces, or one containing the word `value`, arrives as typed.
+fn parse_setoption(line: &str) -> UciCommand {
+    let rest = line.trim_start().strip_prefix("setoption").unwrap_or("").trim_start();
+    let body = match rest.strip_prefix("name") {
+        Some(b) if b.is_empty() || b.starts_with(char::is_whitespace) => b,
+        _ => return UciCommand::Unknown("setoption: missing 'name'".to_string()),
     };
+
+    // The first whole-word `value` ends the name.
+    let split = body.split_whitespace().find(|t| *t == "value").map(|t| {
+        t.as_ptr() as usize - body.as_ptr() as usize
+    });
+    let (name_text, value_text) = match split {
+        Some(at) => (&body[..at], Some(body[at + "value".len()..].trim())),
+        None => (body, None),
+    };
+    let name = name_text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let value = value_text.filter(|v| !v.is_empty()).map(str::to_string);
 
     UciCommand::SetOption { name, value }
 }
@@ -608,6 +602,31 @@ mod tests {
             }
             _ => panic!("Expected SetOption command"),
         }
+    }
+
+    #[test]
+    fn test_parse_setoption_keeps_value_text_verbatim() {
+        match parse_command("setoption name BookFile value /my  books/value  one.bin") {
+            UciCommand::SetOption { name, value } => {
+                assert_eq!(name, "BookFile");
+                assert_eq!(value.as_deref(), Some("/my  books/value  one.bin"));
+            }
+            _ => panic!("Expected SetOption command"),
+        }
+        match parse_command("setoption name Move   Overhead value 50") {
+            UciCommand::SetOption { name, value } => {
+                assert_eq!(name, "Move Overhead");
+                assert_eq!(value.as_deref(), Some("50"));
+            }
+            _ => panic!("Expected SetOption command"),
+        }
+        match parse_command("setoption name Clear Hash") {
+            UciCommand::SetOption { name, value } => {
+                assert_eq!((name.as_str(), value), ("Clear Hash", None));
+            }
+            _ => panic!("Expected SetOption command"),
+        }
+        assert!(matches!(parse_command("setoption nameless"), UciCommand::Unknown(_)));
     }
 
     #[test]

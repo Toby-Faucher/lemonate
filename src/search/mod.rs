@@ -71,8 +71,8 @@ pub const LMR_REDUCTION_LIMIT: i32 = 3;
 /// Precomputed LMR table indexed by [depth][move_count].
 /// Generated from the same formula as the original floating-point version;
 /// see the `lmr_table_matches_formula` test.
-static LMR_TABLE: once_cell::sync::Lazy<[[i32; 256]; 129]> =
-    once_cell::sync::Lazy::new(|| {
+static LMR_TABLE: std::sync::LazyLock<[[i32; 256]; 129]> =
+    std::sync::LazyLock::new(|| {
         let mut table = [[0i32; 256]; 129];
         for depth in 0..129 {
             for move_count in 0..256 {
@@ -635,7 +635,6 @@ impl SearchEngine {
             return self.evaluator.evaluate(board);
         }
 
-        let _is_root = ply == 0;
         let hash = board.position_hash();
         let is_pv = beta - alpha > 1;
 

@@ -25,7 +25,7 @@ pub use polyglot_hash::polyglot_hash;
 use crate::types::{Color, PieceType, Square};
 use crate::board::{Board, Move, MoveType};
 use std::fs::File;
-use std::io::{self, BufReader, Read};
+use std::io::{self, Read};
 use std::path::Path;
 
 /// A single entry from a Polyglot opening book.
@@ -76,23 +76,38 @@ impl BookManager {
         }
     }
 
+    /// Largest book accepted, in bytes (4M entries). The file is read whole, so a mistyped path
+    /// to a huge file must not exhaust memory.
+    pub const MAX_BOOK_BYTES: u64 = 64 * 1024 * 1024;
+
     /// Load a Polyglot opening book from the given path.
     pub fn load<P: AsRef<Path>>(&mut self, path: P) -> io::Result<()> {
-        let file = File::open(path)?;
-        let mut reader = BufReader::new(file);
-        let mut buf = [0u8; 16];
+        let mut file = File::open(path)?;
+        let len = file.metadata()?.len();
+        if len > Self::MAX_BOOK_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("file is {len} bytes; the limit is {}", Self::MAX_BOOK_BYTES),
+            ));
+        }
+        if len % 16 != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("size {len} is not a multiple of 16 bytes (truncated or not a Polyglot book)"),
+            ));
+        }
+        let mut bytes = Vec::with_capacity(len as usize);
+        file.read_to_end(&mut bytes)?;
 
-        self.entries.clear();
-
-        while reader.read_exact(&mut buf).is_ok() {
-            let entry = BookEntry {
+        self.entries = bytes
+            .chunks_exact(16)
+            .map(|buf| BookEntry {
                 key: u64::from_be_bytes(buf[0..8].try_into().unwrap()),
                 raw_move: u16::from_be_bytes(buf[8..10].try_into().unwrap()),
                 weight: u16::from_be_bytes(buf[10..12].try_into().unwrap()),
                 learn: u32::from_be_bytes(buf[12..16].try_into().unwrap()),
-            };
-            self.entries.push(entry);
-        }
+            })
+            .collect();
 
         // Sort by key for binary search
         self.entries.sort_by_key(|e| e.key);
@@ -487,5 +502,16 @@ mod tests {
         assert_eq!(entry.key, 0x463B96181691FC9C);
         assert_eq!(entry.raw_move, 796);
         assert_eq!(entry.weight, 100);
+    }
+
+    #[test]
+    fn test_load_rejects_truncated_book() {
+        let path = std::env::temp_dir().join(format!("lemonate-truncated-{}.bin", std::process::id()));
+        std::fs::write(&path, [0u8; 40]).unwrap();
+        let mut manager = BookManager::new();
+        let err = manager.load(&path).expect_err("40 bytes is not a whole number of entries");
+        std::fs::remove_file(&path).ok();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(!manager.is_loaded());
     }
 }

@@ -1,8 +1,8 @@
 use crate::{AttackTable, Bitboard, Board, CastlingRights, Color, Piece, PieceType, Square};
-use once_cell::sync::Lazy;
+use std::sync::LazyLock;
 
 // Global static attack table - initialized once and shared across all boards
-static ATTACK_TABLE: Lazy<AttackTable> = Lazy::new(|| AttackTable::new());
+static ATTACK_TABLE: LazyLock<AttackTable> = LazyLock::new(AttackTable::new);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Move {

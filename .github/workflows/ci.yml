@@ -8,7 +8,8 @@ on:
 # A newer push to the same pull request makes an older run pointless.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # Only pull requests: a second push to main must not cancel the first commit's run.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -29,6 +30,27 @@ jobs:
       - name: Build both binaries
         run: cargo build --release --bins
 
+  rust-debug:
+    name: unit tests with overflow checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      # The release profile turns off overflow checks and debug_assert!, so this is the only run
+      # in which an arithmetic overflow or a broken assertion can fail a test.
+      - name: Test (unit tests, debug profile)
+        run: cargo test --lib
+
+  clippy:
+    name: clippy (report only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Not a gate yet: the existing warnings are being cleared after the open experiment branches land.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo clippy --all-targets
+
   bench-tooling:
     name: bench tooling
     runs-on: ubuntu-latest
@@ -36,6 +58,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Unit tests for the record logic
-        run: python3 bench/test_bench.py
+        run: |
+          python3 bench/test_bench.py
+          python3 bench/test_sprt.py
+      - name: Research scripts
+        run: |
+          cd research/scripts/tests
+          for t in test_catalog test_cfg test_result test_sprt_parse; do python3 -m unittest $t; done
       - name: Scripts parse
         run: python3 -m py_compile bench/*.py research/scripts/*.py

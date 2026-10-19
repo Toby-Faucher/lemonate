@@ -34,6 +34,8 @@ struct WorkerResult {
 
 /// A search currently running on the worker thread.
 struct ActiveSearch {
+    /// True when nothing but `stop` can end this search (`go infinite`, or no limit at all).
+    endless: bool,
     stop: Arc<AtomicBool>,
     result_rx: mpsc::Receiver<WorkerResult>,
     handle: Option<thread::JoinHandle<()>>,
@@ -117,6 +119,16 @@ impl UciEngine {
         })
     }
 
+    /// Stop a running search because another command replaces it, and still answer the `go` that
+    /// started it: a GUI that sent `go` and then `position` without `stop` waits for that bestmove.
+    fn abort_search(&mut self) {
+        if let Some((result, elapsed_ms)) = self.stop_search() {
+            let mut stdout = io::stdout();
+            let _ = writeln!(stdout, "{}", format_info(&result, elapsed_ms));
+            self.write_bestmove(&mut stdout, result.best_move);
+        }
+    }
+
     /// Join the worker thread and clear the active search.
     /// If the worker died, install a fresh engine so the handler stays usable.
     fn join_worker(&mut self) {
@@ -131,7 +143,7 @@ impl UciEngine {
 
     /// Take ownership of the search engine, stopping any active search first.
     fn take_engine(&mut self) -> SearchEngine {
-        self.stop_search();
+        self.abort_search();
         self.engine.take().unwrap_or_default()
     }
 
@@ -141,15 +153,20 @@ impl UciEngine {
         // loop can also poll for search completion.
         let (line_tx, line_rx) = mpsc::channel::<String>();
         thread::spawn(move || {
-            let stdin = io::stdin();
-            for line in stdin.lock().lines() {
-                match line {
-                    Ok(l) => {
-                        if line_tx.send(l).is_err() {
+            // Read raw bytes so one line that is not valid UTF-8 (a Latin-1 book path, say)
+            // does not end the engine; only EOF or a real I/O error does.
+            let mut stdin = io::stdin().lock();
+            let mut buf = Vec::new();
+            loop {
+                buf.clear();
+                match stdin.read_until(b'\n', &mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {
+                        let line = String::from_utf8_lossy(&buf).trim_end_matches(['\r', '\n']).to_string();
+                        if line_tx.send(line).is_err() {
                             break;
                         }
                     }
-                    Err(_) => break,
                 }
             }
         });
@@ -167,7 +184,16 @@ impl UciEngine {
                     }
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => continue,
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    // EOF (a piped script). A search that has its own limit is allowed to finish
+                    // and report, so `printf 'position startpos\ngo depth 12\n' | lemonate`
+                    // still prints a bestmove. An endless one can only end by `stop`.
+                    while self.active.as_ref().is_some_and(|a| !a.endless) {
+                        self.poll_search(&mut stdout);
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    break;
+                }
             }
         }
 
@@ -314,7 +340,7 @@ impl UciEngine {
             "threads" => {
                 if let Some(v) = value {
                     if let Ok(n) = v.parse::<usize>() {
-                        self.stop_search();
+                        self.abort_search();
                         self.num_threads = n.clamp(1, 256);
                         if self.num_threads == 1 {
                             self.shared_tt = None;
@@ -351,7 +377,7 @@ impl UciEngine {
     /// position the GUI never asked for.
     fn handle_position(&mut self, fen: Option<&str>, moves: &[String], stdout: &mut io::Stdout) {
         // Changing the position while searching is meaningless; stop first.
-        self.stop_search();
+        self.abort_search();
 
         let mut board = match fen {
             Some(f) => match Board::from_fen(f) {
@@ -413,7 +439,7 @@ impl UciEngine {
     /// Handle "go" command: start a search on the worker thread.
     fn handle_go(&mut self, params: GoParams, stdout: &mut io::Stdout) {
         // Only one search at a time; stop (and discard) any active one.
-        self.stop_search();
+        self.abort_search();
 
         // A book move needs no search. Analysis requests (infinite, ponder, fixed depth or
         // nodes, mate search, searchmoves) are left to the engine.
@@ -435,6 +461,17 @@ impl UciEngine {
         let mut limits = self
             .go_params_to_limits(&params, Arc::clone(&stop))
             .with_overhead(self.move_overhead_ms);
+
+        let side_has_clock = match self.board.side_to_move() {
+            Color::White => params.wtime.is_some(),
+            Color::Black => params.btime.is_some(),
+        };
+        let endless = params.infinite
+            || (params.depth.is_none()
+                && params.mate.is_none()
+                && params.movetime.is_none()
+                && params.nodes.is_none()
+                && !side_has_clock);
 
         // Stream every finished iteration to the GUI while the search is still running.
         let started = Instant::now();
@@ -475,7 +512,7 @@ impl UciEngine {
         };
         let (result_tx, result_rx) = mpsc::channel::<WorkerResult>();
         // Generous stack: deep search frames hold fixed-size move buffers.
-        let handle = thread::Builder::new()
+        let spawned = thread::Builder::new()
             .name("lemonate-search".to_string())
             .stack_size(8 * 1024 * 1024)
             .spawn(move || {
@@ -498,10 +535,19 @@ impl UciEngine {
                     result,
                     elapsed_ms,
                 });
-            })
-            .expect("failed to spawn search thread");
+            });
+        let handle = match spawned {
+            Ok(handle) => handle,
+            Err(e) => {
+                // Out of threads or memory: answer instead of aborting the process mid-game.
+                let _ = writeln!(stdout, "info string cannot start the search thread: {e}");
+                self.write_bestmove(stdout, self.board.generate_legal_moves().first().copied());
+                return;
+            }
+        };
 
         self.active = Some(ActiveSearch {
+            endless,
             stop,
             result_rx,
             handle: Some(handle),
@@ -537,65 +583,36 @@ impl UciEngine {
             return limits;
         }
 
-        // Mate search: mate in N needs up to 2*N - 1 plies to confirm.
-        if let Some(mate) = params.mate {
-            let depth = mate
-                .saturating_mul(2)
-                .saturating_sub(1)
-                .max(1)
-                .min(MAX_DEPTH as u32) as u8;
-            let mut limits = SearchLimits::depth(depth).with_stop_signal(stop);
-            if let Some(nodes) = params.nodes {
-                limits = limits.with_nodes(nodes);
-            }
-            return limits;
-        }
-
-        // Fixed depth.
-        if let Some(depth) = params.depth {
-            let mut limits = SearchLimits::depth(depth).with_stop_signal(stop);
-            if let Some(nodes) = params.nodes {
-                limits = limits.with_nodes(nodes);
-            }
-            return limits;
-        }
-
-        // Fixed time.
-        if let Some(movetime) = params.movetime {
-            let mut limits = SearchLimits::movetime(movetime).with_stop_signal(stop);
-            if let Some(nodes) = params.nodes {
-                limits = limits.with_nodes(nodes);
-            }
-            return limits;
-        }
-
-        // Game clock.
+        // Depth, mate and node requests are caps on top of whatever clock the GUI also sent:
+        // `go depth 30 wtime 5000` must still stop in time.
         let side = self.board.side_to_move();
         let (remaining, increment) = match side {
             Color::White => (params.wtime, params.winc),
             Color::Black => (params.btime, params.binc),
         };
+        // Mate in N needs up to 2*N - 1 plies to confirm.
+        let mate_depth = params.mate.map(|mate| {
+            mate.saturating_mul(2)
+                .saturating_sub(1)
+                .max(1)
+                .min(MAX_DEPTH as u32) as u8
+        });
+        let depth_cap = match (params.depth, mate_depth) {
+            (Some(d), Some(m)) => Some(d.min(m)),
+            (d, m) => d.or(m),
+        };
 
-        if let Some(time) = remaining {
-            let mut limits = SearchLimits::game_clock(
-                time,
-                increment.unwrap_or(0),
-                params.movestogo,
-            )
-            .with_stop_signal(stop);
-            if let Some(depth) = params.depth {
-                limits = limits.with_depth(depth);
-            }
-            if let Some(nodes) = params.nodes {
-                limits = limits.with_nodes(nodes);
-            }
-            return limits;
-        }
-
-        // Fallback to infinite (still honoring node/depth caps if given,
-        // e.g. bare `go nodes N`).
-        let mut limits = SearchLimits::infinite().with_stop_signal(stop);
-        if let Some(depth) = params.depth {
+        let base = if let Some(movetime) = params.movetime {
+            SearchLimits::movetime(movetime)
+        } else if let Some(time) = remaining {
+            SearchLimits::game_clock(time, increment.unwrap_or(0), params.movestogo)
+        } else if let Some(depth) = depth_cap {
+            SearchLimits::depth(depth)
+        } else {
+            SearchLimits::infinite()
+        };
+        let mut limits = base.with_stop_signal(stop);
+        if let Some(depth) = depth_cap {
             limits = limits.with_depth(depth);
         }
         if let Some(nodes) = params.nodes {
