@@ -103,6 +103,12 @@ pub const LMP_BASE: usize = 3;
 /// Marks a ply whose static eval is unusable (side to move in check).
 const NO_EVAL: i32 = i32::MIN;
 
+/// Razoring: deepest node at which a hopeless static eval drops straight into quiescence.
+pub const RAZOR_MAX_DEPTH: i32 = 3;
+
+/// Razoring: margin per depth below alpha.
+pub const RAZOR_MARGIN: i32 = 250;
+
 /// Aspiration window initial size.
 pub const ASPIRATION_WINDOW: i32 = 50;
 
@@ -741,6 +747,20 @@ impl SearchEngine {
         // poor, so search one ply shallower (depth stays >= IIR_MIN_DEPTH - 1).
         if !in_check && depth >= IIR_MIN_DEPTH && hash_move.is_none() {
             depth -= 1;
+        }
+
+        // Razoring: far below alpha at shallow depth, so check with quiescence and give up the
+        // full search if even the captures cannot get back up to alpha.
+        if !is_pv
+            && !in_check
+            && depth <= RAZOR_MAX_DEPTH
+            && alpha.abs() < MATE_SCORE - MAX_DEPTH as i32
+            && static_eval + RAZOR_MARGIN * depth <= alpha
+        {
+            let q = self.quiescence(board, alpha, alpha + 1, ply);
+            if q <= alpha {
+                return q;
+            }
         }
 
         // Null move pruning
