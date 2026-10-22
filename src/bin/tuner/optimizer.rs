@@ -66,6 +66,8 @@ pub fn format_weights(weights: &EvalWeights) -> String {
     out.push_str(&format_array("ROOK_MOBILITY_EG", &weights.rook_mobility_eg));
     out.push_str(&format_array("QUEEN_MOBILITY_MG", &weights.queen_mobility_mg));
     out.push_str(&format_array("QUEEN_MOBILITY_EG", &weights.queen_mobility_eg));
+    out.push_str(&format_scalar("BISHOP_PAIR_MG", weights.bishop_pair_mg));
+    out.push_str(&format_scalar("BISHOP_PAIR_EG", weights.bishop_pair_eg));
 
     out
 }
@@ -343,9 +345,9 @@ mod tests {
     #[test]
     fn format_weights_has_expected_line_count() {
         // 12 PST arrays + 10 pawn-structure consts + 8 king-safety
-        // scalars + 8 mobility arrays = 38 lines.
+        // scalars + 8 mobility arrays + 2 bishop-pair scalars = 40 lines.
         let output = format_weights(&EvalWeights::DEFAULT);
-        assert_eq!(output.lines().count(), 38);
+        assert_eq!(output.lines().count(), 40);
     }
 
     #[test]

@@ -195,4 +195,58 @@ mod tests {
             449
         );
     }
+
+    /// Colour-mirror a FEN: flip ranks, swap piece case, swap side to move.
+    fn mirror_fen(fen: &str) -> String {
+        let mut parts = fen.split(' ');
+        let board: Vec<String> = parts
+            .next()
+            .unwrap()
+            .split('/')
+            .rev()
+            .map(|r| {
+                r.chars()
+                    .map(|c| {
+                        if c.is_ascii_uppercase() {
+                            c.to_ascii_lowercase()
+                        } else {
+                            c.to_ascii_uppercase()
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+        let stm = if parts.next().unwrap() == "w" { "b" } else { "w" };
+        format!("{} {} - - 0 1", board.join("/"), stm)
+    }
+
+    #[test]
+    fn eval_is_colour_symmetric() {
+        let evaluator = Evaluator::new();
+        for fen in [
+            "r1bqk2r/pp1nbppp/2p2n2/3p4/3P4/2N1PN2/PPP1BPPP/R1BQK2R w - - 0 1",
+            "r2qk2r/pp1n1ppp/2p2n2/3p4/3P4/2N1PN2/PPP1BPPP/R1BQK2R w - - 0 1",
+            "4k3/8/8/3b4/8/2B1B3/8/4K3 b - - 0 1",
+        ] {
+            let a = evaluator.evaluate(&Board::from_fen(fen).unwrap());
+            let b = evaluator.evaluate(&Board::from_fen(&mirror_fen(fen)).unwrap());
+            assert_eq!(a, b, "asymmetric eval for {}", fen);
+        }
+    }
+
+    #[test]
+    fn bishop_pair_bonus_fires_only_with_two_bishops() {
+        let evaluator = Evaluator::new();
+        let w = &EvalWeights::DEFAULT;
+        let pov = |fen: &str| evaluator.static_eval_white_pov(&Board::from_fen(fen).unwrap(), w);
+        // White has two bishops vs one bishop + one knight; neutral case swaps the second
+        // bishop for a knight on a square of similar value.
+        let pair = pov("4k3/8/8/8/8/8/8/2B1KB2 w - - 0 1");
+        let no_pair = pov("4k3/8/8/8/8/8/8/2B1KN2 w - - 0 1");
+        assert!(pair - no_pair > 20, "pair {} vs no pair {}", pair, no_pair);
+        // One bishop each: term must not fire for either side.
+        assert_eq!(pov("4kb2/8/8/8/8/8/8/4KB2 w - - 0 1"), 0);
+        // Both sides with the pair cancel.
+        assert_eq!(pov("2b1kb2/8/8/8/8/8/8/2B1KB2 w - - 0 1"), 0);
+    }
 }
