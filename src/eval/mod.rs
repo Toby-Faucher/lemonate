@@ -7,6 +7,7 @@ mod mobility;
 mod pawn_structure;
 mod phase;
 mod pst;
+mod rook;
 mod weights;
 
 pub use king_safety::KingSafetyEval;
@@ -46,11 +47,12 @@ impl Evaluator {
         let score = self.static_eval_white_pov(board, &EvalWeights::DEFAULT);
 
         // Return score from side-to-move's perspective for negamax
-        if board.side_to_move() == Color::White {
+        let pov = if board.side_to_move() == Color::White {
             score
         } else {
             -score
-        }
+        };
+        pov + rook::TEMPO
     }
 
     /// The tapered evaluation score from White's perspective (no
@@ -69,6 +71,7 @@ impl Evaluator {
             + self
                 .mobility
                 .evaluate_with_phase_and_weights(board, phase, weights)
+            + rook::evaluate(board, phase)
     }
 
     pub fn evaluate_detailed(&self, board: &Board) -> EvalDetails {
@@ -130,7 +133,7 @@ mod tests {
         let evaluator = Evaluator::new();
         for (fen, expected) in KNOWN_CASES {
             let board = Board::from_fen(fen).unwrap();
-            assert_eq!(evaluator.evaluate(&board), expected, "mismatch for {}", fen);
+            assert_eq!(evaluator.evaluate(&board), expected + rook::TEMPO, "mismatch for {}", fen);
         }
     }
 
@@ -189,7 +192,7 @@ mod tests {
         let board = Board::from_fen(fen).unwrap();
         let evaluator = Evaluator::new();
 
-        assert_eq!(evaluator.evaluate(&board), -449);
+        assert_eq!(evaluator.evaluate(&board), -449 + rook::TEMPO);
         assert_eq!(
             evaluator.static_eval_white_pov(&board, &EvalWeights::DEFAULT),
             449
