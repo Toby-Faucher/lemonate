@@ -25,6 +25,38 @@ use std::sync::{
 use std::thread;
 use std::time::{Duration, Instant};
 
+const BENCH_DEPTH: u8 = 10;
+
+const BENCH_FENS: [&str; 14] = [
+    "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+    "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+    "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
+    "r3k2r/Pppp1ppp/1b3nbN/nP6/BBP1P3/q4N2/Pp1P2PP/R2Q1RK1 w kq - 0 1",
+    "rnbq1k1r/pp1Pbppp/2p5/8/2B5/8/PPP1NnPP/RNBQK2R w KQ - 1 8",
+    "r4rk1/1pp1qppp/p1np1n2/2b1p1B1/2B1P1b1/P1NP1N2/1PP1QPPP/R4RK1 w - - 0 10",
+    "r1bqkb1r/pppp1ppp/2n2n2/4p2Q/2B1P3/8/PPPP1PPP/RNB1K1NR w KQkq - 4 4",
+    "2rr3k/pp3pp1/1nnqbN1p/3pN3/2pP4/2P3Q1/PPB4P/R4RK1 w - - 0 1",
+    "8/8/4k3/8/2p5/8/B2K4/8 w - - 0 1",
+    "4k3/8/8/8/8/8/4P3/4K3 w - - 0 1",
+    "8/5pk1/6p1/8/8/6P1/5PK1/3R4 w - - 0 1",
+    "r2q1rk1/pp2ppbp/2np1np1/2pP4/4P1b1/2N1BN2/PPP1BPPP/R2Q1RK1 w - - 0 9",
+    "3r2k1/pp3ppp/2p5/8/3P4/2P2N2/PP3PPP/6K1 b - - 0 1",
+    "r1b2rk1/2q1bppp/p2p1n2/np2p3/3NP3/1BN1BP2/PPP3PP/R2Q1RK1 w - - 0 12",
+];
+
+/// Search every bench position to `depth` with a fresh engine. Returns (nodes, elapsed ms).
+fn run_bench(depth: u8, hash_mb: usize) -> (u64, u128) {
+    let start = Instant::now();
+    let mut nodes = 0;
+    for fen in BENCH_FENS {
+        let mut board = Board::from_fen(fen).expect("bench FEN is valid");
+        board.enable_history();
+        let mut engine = SearchEngine::with_hash_size(hash_mb);
+        nodes += engine.search(&board, SearchLimits::depth(depth)).stats.nodes;
+    }
+    (nodes, start.elapsed().as_millis())
+}
+
 /// Result sent back by the search worker thread.
 struct WorkerResult {
     engine: SearchEngine,
@@ -218,6 +250,7 @@ impl UciEngine {
             UciCommand::Go(params) => self.handle_go(params, stdout),
             UciCommand::Stop => self.handle_stop(stdout),
             UciCommand::PonderHit => {} // Not implemented.
+            UciCommand::Bench(depth) => self.handle_bench(depth, stdout),
             UciCommand::Quit => return false,
             UciCommand::Unknown(cmd) => {
                 if self.debug && !cmd.is_empty() {
@@ -554,6 +587,29 @@ impl UciEngine {
         });
     }
 
+    /// Handle "bench" command: fixed-depth search of [`BENCH_FENS`], single thread, fresh TT each.
+    fn handle_bench(&mut self, depth: Option<u8>, stdout: &mut io::Stdout) {
+        self.abort_search();
+        let depth = depth.unwrap_or(BENCH_DEPTH).clamp(1, MAX_DEPTH);
+        let hash_mb = self.hash_mb;
+        // Same generous stack as the search worker.
+        let run = thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(move || run_bench(depth, hash_mb))
+            .map(|h| h.join());
+        match run {
+            Ok(Ok((nodes, ms))) => {
+                let nps = (nodes as u128 * 1000 / ms.max(1)) as u64;
+                let _ = writeln!(stdout, "\n===========================");
+                let _ = writeln!(stdout, "Total time (ms) : {ms}");
+                let _ = writeln!(stdout, "Nodes searched  : {nodes}");
+                let _ = writeln!(stdout, "{nodes} nodes {nps} nps");
+            }
+            _ => self.report_error(stdout, "bench failed"),
+        }
+        let _ = stdout.flush();
+    }
+
     /// Handle "stop" command: halt the search and report the best move so far.
     fn handle_stop(&mut self, stdout: &mut io::Stdout) {
         if let Some((result, elapsed_ms)) = self.stop_search() {
@@ -625,5 +681,16 @@ impl UciEngine {
 impl Default for UciEngine {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bench_is_deterministic() {
+        assert_eq!(run_bench(2, 1).0, run_bench(2, 1).0);
+        assert!(run_bench(2, 1).0 > 0);
     }
 }

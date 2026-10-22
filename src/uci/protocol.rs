@@ -71,6 +71,8 @@ pub enum UciCommand {
     PonderHit,
     /// Quit the engine.
     Quit,
+    /// Fixed-depth node-count benchmark (optional depth).
+    Bench(Option<u8>),
     /// Unknown command.
     Unknown(String),
 }
@@ -124,6 +126,7 @@ pub fn parse_command(line: &str) -> UciCommand {
         Some("stop") => UciCommand::Stop,
         Some("ponderhit") => UciCommand::PonderHit,
         Some("quit") => UciCommand::Quit,
+        Some("bench") => UciCommand::Bench(tokens.next().and_then(|d| d.parse().ok())),
         _ => UciCommand::Unknown(line.to_string()),
     }
 }
