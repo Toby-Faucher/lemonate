@@ -463,6 +463,9 @@ impl SearchEngine {
         // Helpers with a stagger above the cap still search the cap.
         let start_depth = start_depth.clamp(1, max_depth);
 
+        // Best-move stability and score trend, for scaling the soft time limit.
+        let mut stable_iters = 0u32;
+
         for depth in start_depth..=max_depth {
             // Check if we should stop before starting new iteration.
             if depth > 1 && !self.time_manager.can_start_iteration() {
@@ -495,6 +498,20 @@ impl SearchEngine {
             // Check if search was stopped.
             if self.should_stop() && depth > 1 {
                 break;
+            }
+
+            // Scale the soft limit by best-move stability and score drop (game clock only).
+            if result.depth > 0 {
+                let changed = best_move != result.best_move;
+                stable_iters = if changed { 1 } else { stable_iters + 1 };
+                let drop = if is_mate_score(score) || is_mate_score(result.score) {
+                    0
+                } else {
+                    result.score - score
+                };
+                self.time_manager.adjust_after_iteration(stable_iters, changed, drop);
+            } else {
+                stable_iters = 1;
             }
 
             // Update result with this iteration's findings.
