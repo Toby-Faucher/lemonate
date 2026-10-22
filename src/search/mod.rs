@@ -103,6 +103,15 @@ pub const REVERSE_FUTILITY_MARGIN: i32 = 100;
 /// Maximum depth at which reverse futility pruning applies.
 pub const REVERSE_FUTILITY_MAX_DEPTH: i32 = 6;
 
+/// ProbCut: shallowest node where it is tried.
+pub const PROBCUT_MIN_DEPTH: i32 = 5;
+
+/// ProbCut: how far above beta the reduced capture search must score to cut.
+pub const PROBCUT_MARGIN: i32 = 200;
+
+/// ProbCut: plies removed from the verification search.
+pub const PROBCUT_REDUCTION: i32 = 4;
+
 /// Late move pruning: deepest node at which late quiet moves are skipped outright.
 pub const LMP_MAX_DEPTH: i32 = 4;
 
@@ -819,6 +828,18 @@ impl SearchEngine {
             }
         }
 
+        // ProbCut: a reduced capture search that beats beta by a margin predicts a fail high.
+        if !is_pv
+            && excluded.is_none()
+            && !in_check
+            && depth >= PROBCUT_MIN_DEPTH
+            && beta.abs() < MATE_SCORE - MAX_DEPTH as i32
+        {
+            if let Some(score) = self.probcut(board, depth, beta, ply) {
+                return score;
+            }
+        }
+
         // Create move orderer over a stack buffer (no heap allocation).
         // Killer moves are copied out so the loop can use &mut tables.
         // The orderer copies the move list; all borrows end here.
@@ -1263,6 +1284,40 @@ impl SearchEngine {
             return Some(score);
         }
 
+        None
+    }
+
+    /// ProbCut: try the captures with a reduced null-window search at `beta + margin`.
+    fn probcut(&mut self, board: &mut Board, depth: i32, beta: i32, ply: u8) -> Option<i32> {
+        let pc_beta = beta + PROBCUT_MARGIN;
+        let hash = board.position_hash();
+        // Copy the captures: the per-ply buffer is reused by deeper nodes only at deeper plies,
+        // but a local copy keeps the borrow of self free for the recursive calls.
+        let captures: Vec<Move> = self.move_buffers[ply as usize]
+            .iter()
+            .filter(|m| m.captured.is_some())
+            .copied()
+            .collect();
+        for mv in captures {
+            let undo = board.do_move(mv);
+            self.path.push(hash);
+            let score = -self.negamax(
+                board,
+                depth - 1 - PROBCUT_REDUCTION,
+                -pc_beta,
+                -pc_beta + 1,
+                ply + 1,
+                None,
+            );
+            self.path.pop();
+            board.undo_move(mv, undo);
+            if self.should_stop() {
+                return None;
+            }
+            if score >= pc_beta && !is_mate_score(score) {
+                return Some(score);
+            }
+        }
         None
     }
 
