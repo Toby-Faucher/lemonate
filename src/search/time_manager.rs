@@ -50,6 +50,21 @@ const MAX_TIME_FRACTION: f64 = 0.25;
 /// Soft limit as fraction of hard limit.
 const SOFT_LIMIT_FRACTION: f64 = 0.6;
 
+/// Consecutive iterations with the same best move before the soft limit shrinks.
+const STABLE_ITERATIONS: u32 = 4;
+
+/// Soft limit multiplier once the best move is stable.
+const STABLE_SCALE: f64 = 0.7;
+
+/// Soft limit multiplier when the best move changed on the last iteration.
+const CHANGED_SCALE: f64 = 1.3;
+
+/// Score drop (centipawns) versus the previous iteration that buys extra time.
+const SCORE_DROP_CP: i32 = 30;
+
+/// Soft limit multiplier when the score dropped by at least `SCORE_DROP_CP`.
+const SCORE_DROP_SCALE: f64 = 1.4;
+
 /// Minimum time to allocate (1 millisecond).
 const MIN_TIME_MS: u64 = 1;
 
@@ -214,6 +229,8 @@ pub struct TimeManager {
     node_limit: Option<u64>,
     /// Whether time limits apply (false for depth/infinite).
     use_time_limit: bool,
+    /// Whether this is a game-clock search (only these scale the soft limit per iteration).
+    dynamic_soft: bool,
     /// Shared stop flag set by another thread (UCI `stop`).
     stop_signal: Option<Arc<AtomicBool>>,
 }
@@ -261,6 +278,7 @@ impl TimeManager {
             nodes_searched: 0,
             node_limit: limits.max_nodes,
             use_time_limit,
+            dynamic_soft: matches!(limits.time_control, TimeControl::GameClock { .. }),
             stop_signal: limits.stop_signal.clone(),
         }
     }
@@ -465,6 +483,40 @@ impl TimeManager {
         self.soft_limit = Duration::from_millis(new_soft_ms.max(MIN_TIME_MS));
     }
 
+    /// Multiplier for the soft limit from the last iteration's behaviour.
+    ///
+    /// `stable_iters` counts consecutive iterations (including the last) with the same
+    /// best move; `changed` is true when the last iteration switched best move;
+    /// `score_drop` is previous score minus current score in centipawns.
+    fn dynamic_scale(stable_iters: u32, changed: bool, score_drop: i32) -> f64 {
+        let mut scale = 1.0;
+        if changed {
+            scale *= CHANGED_SCALE;
+        } else if stable_iters >= STABLE_ITERATIONS {
+            scale *= STABLE_SCALE;
+        }
+        if score_drop >= SCORE_DROP_CP {
+            scale *= SCORE_DROP_SCALE;
+        }
+        scale
+    }
+
+    /// Rescale the soft limit after a finished iteration (game-clock searches only).
+    ///
+    /// Always derived from the base soft limit and never above the hard limit, so
+    /// repeated calls do not compound.
+    pub fn adjust_after_iteration(&mut self, stable_iters: u32, changed: bool, score_drop: i32) {
+        if !self.dynamic_soft {
+            return;
+        }
+
+        let scale = Self::dynamic_scale(stable_iters, changed, score_drop);
+        let scaled = self.base_soft_limit.mul_f64(scale);
+        self.soft_limit = scaled
+            .min(self.hard_limit)
+            .max(Duration::from_millis(MIN_TIME_MS).min(self.hard_limit));
+    }
+
     /// Get the soft time limit.
     pub fn soft_limit(&self) -> Duration {
         self.soft_limit
@@ -494,6 +546,7 @@ impl Default for TimeManager {
             nodes_searched: 0,
             node_limit: None,
             use_time_limit: false,
+            dynamic_soft: false,
             stop_signal: None,
         }
     }
@@ -691,6 +744,60 @@ mod tests {
         // Many iterations with same move - should reduce.
         tm.adjust_for_stability(6);
         assert!(tm.soft_limit() < original_soft);
+    }
+
+    #[test]
+    fn dynamic_scale_shrinks_when_stable_and_grows_when_changed() {
+        let base = TimeManager::new(&SearchLimits::game_clock(60_000, 0, None));
+        let base_soft = base.soft_limit();
+
+        let mut stable = TimeManager::new(&SearchLimits::game_clock(60_000, 0, None));
+        stable.adjust_after_iteration(4, false, 0);
+        assert!(stable.soft_limit() < base_soft);
+
+        let mut few = TimeManager::new(&SearchLimits::game_clock(60_000, 0, None));
+        few.adjust_after_iteration(3, false, 0);
+        assert_eq!(few.soft_limit(), base_soft);
+
+        let mut changed = TimeManager::new(&SearchLimits::game_clock(60_000, 0, None));
+        changed.adjust_after_iteration(1, true, 0);
+        assert!(changed.soft_limit() > base_soft);
+
+        let mut dropped = TimeManager::new(&SearchLimits::game_clock(60_000, 0, None));
+        dropped.adjust_after_iteration(2, false, SCORE_DROP_CP);
+        assert!(dropped.soft_limit() > base_soft);
+    }
+
+    #[test]
+    fn dynamic_scale_is_capped_by_the_hard_limit_and_does_not_compound() {
+        let mut tm = TimeManager::new(&SearchLimits::game_clock(60_000, 0, None));
+        let base_soft = tm.soft_limit();
+        tm.hard_limit = base_soft + Duration::from_millis(1);
+        tm.adjust_after_iteration(1, true, 100);
+        assert_eq!(tm.soft_limit(), tm.hard_limit());
+
+        let mut tm = TimeManager::new(&SearchLimits::game_clock(60_000, 0, None));
+        tm.adjust_after_iteration(1, true, 0);
+        let once = tm.soft_limit();
+        tm.adjust_after_iteration(1, true, 0);
+        assert_eq!(tm.soft_limit(), once);
+    }
+
+    #[test]
+    fn dynamic_scale_ignores_non_clock_searches() {
+        for limits in [
+            SearchLimits::movetime(1000),
+            SearchLimits::depth(10),
+            SearchLimits::infinite(),
+            SearchLimits::infinite().with_nodes(1000),
+        ] {
+            let mut tm = TimeManager::new(&limits);
+            let soft = tm.soft_limit();
+            tm.adjust_after_iteration(1, true, 100);
+            assert_eq!(tm.soft_limit(), soft);
+            tm.adjust_after_iteration(10, false, 0);
+            assert_eq!(tm.soft_limit(), soft);
+        }
     }
 
     #[test]

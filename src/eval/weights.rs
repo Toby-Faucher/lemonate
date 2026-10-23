@@ -4,7 +4,7 @@ use super::king_safety::{
     SEMI_OPEN_FILE_NEAR_KING_MG,
 };
 use super::mobility::{
-    BISHOP_MOBILITY_EG, BISHOP_MOBILITY_MG, KNIGHT_MOBILITY_EG, KNIGHT_MOBILITY_MG,
+    BISHOP_MOBILITY_EG, BISHOP_MOBILITY_MG, BISHOP_PAIR_EG, BISHOP_PAIR_MG, KNIGHT_MOBILITY_EG, KNIGHT_MOBILITY_MG,
     QUEEN_MOBILITY_EG, QUEEN_MOBILITY_MG, ROOK_MOBILITY_EG, ROOK_MOBILITY_MG,
 };
 use super::pawn_structure::{
@@ -67,6 +67,9 @@ pub struct EvalWeights {
     pub rook_mobility_eg: [i32; 15],
     pub queen_mobility_mg: [i32; 28],
     pub queen_mobility_eg: [i32; 28],
+
+    pub bishop_pair_mg: i32,
+    pub bishop_pair_eg: i32,
 }
 
 impl EvalWeights {
@@ -113,13 +116,15 @@ impl EvalWeights {
         rook_mobility_eg: ROOK_MOBILITY_EG,
         queen_mobility_mg: QUEEN_MOBILITY_MG,
         queen_mobility_eg: QUEEN_MOBILITY_EG,
+        bishop_pair_mg: BISHOP_PAIR_MG,
+        bishop_pair_eg: BISHOP_PAIR_EG,
     };
 
     /// Flattens every tunable scalar into one vector, in a fixed order,
     /// for the coordinate-descent optimizer to iterate over. Paired
     /// with `from_vec`.
     pub fn to_vec(&self) -> Vec<i32> {
-        let mut v = Vec::with_capacity(768 + 24 + 8 + 132);
+        let mut v = Vec::with_capacity(768 + 24 + 8 + 132 + 2);
         for table in &self.pst_mg {
             v.extend_from_slice(table);
         }
@@ -152,14 +157,16 @@ impl EvalWeights {
         v.extend_from_slice(&self.rook_mobility_eg);
         v.extend_from_slice(&self.queen_mobility_mg);
         v.extend_from_slice(&self.queen_mobility_eg);
+        v.push(self.bishop_pair_mg);
+        v.push(self.bishop_pair_eg);
         v
     }
 
     /// Rebuilds an `EvalWeights` from a vector produced by `to_vec`.
     /// Panics if `v.len()` doesn't match the expected total (768 + 24
-    /// + 8 + 132 = 932).
+    /// + 8 + 132 + 2 = 934).
     pub fn from_vec(v: &[i32]) -> Self {
-        assert_eq!(v.len(), 768 + 24 + 8 + 132, "unexpected parameter vector length");
+        assert_eq!(v.len(), 768 + 24 + 8 + 132 + 2, "unexpected parameter vector length");
 
         let mut i = 0;
         let mut take = |n: usize| {
@@ -216,6 +223,8 @@ impl EvalWeights {
         queen_mobility_mg.copy_from_slice(take(28));
         let mut queen_mobility_eg = [0i32; 28];
         queen_mobility_eg.copy_from_slice(take(28));
+        let bishop_pair_mg = take(1)[0];
+        let bishop_pair_eg = take(1)[0];
 
         EvalWeights {
             pst_mg,
@@ -246,6 +255,8 @@ impl EvalWeights {
             rook_mobility_eg,
             queen_mobility_mg,
             queen_mobility_eg,
+            bishop_pair_mg,
+            bishop_pair_eg,
         }
     }
 }
@@ -329,7 +340,8 @@ mod tests {
         // 6 pieces * 64 squares * 2 (mg/eg) = 768 PST values, plus
         // 6 pawn scalars + 8+8 passed-pawn arrays + 2 connected scalars = 24,
         // plus 8 king-safety scalars,
-        // plus (9+9+14+14+15+15+28+28) = 132 mobility values.
-        assert_eq!(EvalWeights::DEFAULT.to_vec().len(), 768 + 24 + 8 + 132);
+        // plus (9+9+14+14+15+15+28+28) = 132 mobility values,
+        // plus 2 bishop-pair scalars.
+        assert_eq!(EvalWeights::DEFAULT.to_vec().len(), 768 + 24 + 8 + 132 + 2);
     }
 }
