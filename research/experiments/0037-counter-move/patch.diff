@@ -1,0 +1,120 @@
+diff --git a/src/search/mod.rs b/src/search/mod.rs
+index 66cc6fe..f39e703 100644
+--- a/src/search/mod.rs
++++ b/src/search/mod.rs
+@@ -238,6 +238,9 @@ pub struct SearchEngine {
+     /// Static eval at each ply of the line being searched (`NO_EVAL` when in check), used to
+     /// tell whether the side to move is improving on its position two plies ago.
+     eval_stack: [i32; PV_SIZE + 2],
++    /// Move played at each ply of the line being searched (`None` after a null move), so a
++    /// node can find the opponent's previous move for the counter-move table.
++    move_stack: [Option<Move>; PV_SIZE + 2],
+ }
+ 
+ impl SearchEngine {
+@@ -260,6 +263,7 @@ impl SearchEngine {
+             path_root: 0,
+             info_sink: None,
+             eval_stack: [NO_EVAL; PV_SIZE + 2],
++            move_stack: [None; PV_SIZE + 2],
+         }
+     }
+ 
+@@ -759,11 +763,14 @@ impl SearchEngine {
+         // Killer moves are copied out so the loop can use &mut tables.
+         // The orderer copies the move list; all borrows end here.
+         let killer_moves = self.killers.get_killers(ply);
+-        let mut orderer = MoveOrderer::new(
++        let prev_move = if ply > 0 { self.move_stack[ply as usize - 1] } else { None };
++        let counter = prev_move.and_then(|pm| self.counters.get(&pm));
++        let mut orderer = MoveOrderer::with_counter(
+             board,
+             &self.move_buffers[ply as usize],
+             hash_move,
+             killer_moves,
++            counter,
+             &self.history,
+         );
+ 
+@@ -856,6 +863,7 @@ impl SearchEngine {
+ 
+             // The position we are leaving joins the path for the children's repetition check.
+             self.path.push(hash);
++            self.move_stack[ply as usize] = Some(mv);
+ 
+             // Principal variation search. The first move gets the full window. Every later
+             // move is scouted with a null window (reduced when LMR applies) and only
+@@ -1160,6 +1168,7 @@ impl SearchEngine {
+         let leaving = board.position_hash();
+         board.make_null_move();
+         self.path.push(leaving);
++        self.move_stack[ply as usize] = None;
+ 
+         // Search with reduced depth.
+         let reduction = NULL_MOVE_REDUCTION + depth / 6;
+@@ -1245,6 +1254,13 @@ impl SearchEngine {
+         // Update killer moves.
+         self.killers.store(ply, *mv);
+ 
++        // Remember this move as the answer to the opponent's previous move.
++        if ply > 0 {
++            if let Some(pm) = self.move_stack[ply as usize - 1] {
++                self.counters.store(&pm, *mv);
++            }
++        }
++
+         // Update history heuristic.
+         self.history.update(color, mv, quiets_tried, depth);
+     }
+diff --git a/src/search/move_ordering.rs b/src/search/move_ordering.rs
+index 2347812..53309f5 100644
+--- a/src/search/move_ordering.rs
++++ b/src/search/move_ordering.rs
+@@ -106,6 +106,8 @@ pub struct MoveOrderer {
+     hash_move: Option<Move>,
+     /// Killer moves copied out for this ply.
+     killers: [Option<Move>; KILLERS_PER_PLY],
++    /// Counter move to the opponent's previous move (quiet, ranked just below killers).
++    counter: Option<Move>,
+ }
+ 
+ impl MoveOrderer {
+@@ -123,6 +125,18 @@ impl MoveOrderer {
+         hash_move: Option<Move>,
+         killers: [Option<Move>; KILLERS_PER_PLY],
+         history: &HistoryTable,
++    ) -> Self {
++        Self::with_counter(board, moves, hash_move, killers, None, history)
++    }
++
++    /// Like `new`, with the counter move to the opponent's previous move.
++    pub fn with_counter(
++        board: &Board,
++        moves: &[Move],
++        hash_move: Option<Move>,
++        killers: [Option<Move>; KILLERS_PER_PLY],
++        counter: Option<Move>,
++        history: &HistoryTable,
+     ) -> Self {
+         debug_assert!(moves.len() <= MAX_MOVES);
+         let mut orderer = Self {
+@@ -131,6 +145,7 @@ impl MoveOrderer {
+             current: 0,
+             hash_move,
+             killers,
++            counter,
+         };
+         for (i, mv) in moves.iter().take(MAX_MOVES).enumerate() {
+             orderer.moves[i].mv = *mv;
+@@ -181,6 +196,11 @@ impl MoveOrderer {
+                 continue;
+             }
+ 
++            if self.counter == Some(mv) {
++                self.moves[i].score = scores::COUNTER_MOVE;
++                continue;
++            }
++
+             // Quiet moves use history heuristic.
+             self.moves[i].score = scores::QUIET_BASE + history.get(color, &mv);
+         }

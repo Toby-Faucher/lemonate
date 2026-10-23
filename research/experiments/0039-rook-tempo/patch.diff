@@ -1,0 +1,135 @@
+diff --git a/src/eval/mod.rs b/src/eval/mod.rs
+index 098e7cb..d59fd0d 100644
+--- a/src/eval/mod.rs
++++ b/src/eval/mod.rs
+@@ -7,6 +7,7 @@ mod mobility;
+ mod pawn_structure;
+ mod phase;
+ mod pst;
++mod rook;
+ mod weights;
+ 
+ pub use king_safety::KingSafetyEval;
+@@ -46,11 +47,12 @@ impl Evaluator {
+         let score = self.static_eval_white_pov(board, &EvalWeights::DEFAULT);
+ 
+         // Return score from side-to-move's perspective for negamax
+-        if board.side_to_move() == Color::White {
++        let pov = if board.side_to_move() == Color::White {
+             score
+         } else {
+             -score
+-        }
++        };
++        pov + rook::TEMPO
+     }
+ 
+     /// The tapered evaluation score from White's perspective (no
+@@ -69,6 +71,7 @@ impl Evaluator {
+             + self
+                 .mobility
+                 .evaluate_with_phase_and_weights(board, phase, weights)
++            + rook::evaluate(board, phase)
+     }
+ 
+     pub fn evaluate_detailed(&self, board: &Board) -> EvalDetails {
+@@ -130,7 +133,7 @@ mod tests {
+         let evaluator = Evaluator::new();
+         for (fen, expected) in KNOWN_CASES {
+             let board = Board::from_fen(fen).unwrap();
+-            assert_eq!(evaluator.evaluate(&board), expected, "mismatch for {}", fen);
++            assert_eq!(evaluator.evaluate(&board), expected + rook::TEMPO, "mismatch for {}", fen);
+         }
+     }
+ 
+@@ -189,7 +192,7 @@ mod tests {
+         let board = Board::from_fen(fen).unwrap();
+         let evaluator = Evaluator::new();
+ 
+-        assert_eq!(evaluator.evaluate(&board), -449);
++        assert_eq!(evaluator.evaluate(&board), -449 + rook::TEMPO);
+         assert_eq!(
+             evaluator.static_eval_white_pov(&board, &EvalWeights::DEFAULT),
+             449
+diff --git a/src/eval/rook.rs b/src/eval/rook.rs
+new file mode 100644
+index 0000000..7215737
+--- /dev/null
++++ b/src/eval/rook.rs
+@@ -0,0 +1,76 @@
++use crate::bitboard::{Bitboard, FILES, RANK_1, RANK_2};
++use crate::types::Color;
++use crate::{Board, PieceType};
++
++use super::phase::GamePhase;
++
++// Fixed (not tuner-controlled) centipawn bonuses, so `EvalWeights` is unchanged.
++const OPEN_FILE_MG: i32 = 20;
++const OPEN_FILE_EG: i32 = 10;
++const SEMI_OPEN_FILE_MG: i32 = 10;
++const SEMI_OPEN_FILE_EG: i32 = 5;
++const SEVENTH_MG: i32 = 20;
++const SEVENTH_EG: i32 = 30;
++const RANK_7: Bitboard = Bitboard(0x00FF_0000_0000_0000);
++const RANK_8: Bitboard = Bitboard(0xFF00_0000_0000_0000);
++
++/// Side-to-move bonus, added in `Evaluator::evaluate` only.
++pub const TEMPO: i32 = 10;
++
++fn side(board: &Board, color: Color) -> (i32, i32) {
++    let ours = board.piece_bitboard(color, PieceType::Pawn);
++    let theirs = board.piece_bitboard(color.opposite(), PieceType::Pawn);
++    let (seventh, back) = if color == Color::White { (RANK_7, RANK_8) } else { (RANK_2, RANK_1) };
++    let enemy_king = board.piece_bitboard(color.opposite(), PieceType::King);
++    let seventh_matters = !(theirs & seventh).is_empty() || !(enemy_king & back).is_empty();
++    let (mut mg, mut eg) = (0, 0);
++    for sq in board.piece_bitboard(color, PieceType::Rook) {
++        let file = FILES[sq.file() as usize];
++        if (ours & file).is_empty() {
++            if (theirs & file).is_empty() {
++                mg += OPEN_FILE_MG;
++                eg += OPEN_FILE_EG;
++            } else {
++                mg += SEMI_OPEN_FILE_MG;
++                eg += SEMI_OPEN_FILE_EG;
++            }
++        }
++        if seventh_matters && !(Bitboard(1u64 << sq.index()) & seventh).is_empty() {
++            mg += SEVENTH_MG;
++            eg += SEVENTH_EG;
++        }
++    }
++    (mg, eg)
++}
++
++/// Rook placement term, White's point of view, tapered by `phase`.
++pub fn evaluate(board: &Board, phase: i32) -> i32 {
++    let (wm, we) = side(board, Color::White);
++    let (bm, be) = side(board, Color::Black);
++    GamePhase::new().taper(wm - bm, we - be, phase)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn score(fen: &str) -> i32 {
++        evaluate(&Board::from_fen(fen).unwrap(), 24)
++    }
++
++    #[test]
++    fn open_file_rook_scores_and_closed_does_not() {
++        assert_eq!(score("4k3/8/8/8/8/8/8/R3K3 w - - 0 1"), OPEN_FILE_MG);
++        assert_eq!(score("4k3/p7/8/8/8/8/P7/R3K3 w - - 0 1"), 0);
++        // Only the enemy has a pawn on the file: semi-open.
++        assert_eq!(score("4k3/p7/8/8/8/8/8/R3K3 w - - 0 1"), SEMI_OPEN_FILE_MG);
++    }
++
++    #[test]
++    fn seventh_rank_rook_is_mirrored() {
++        let w = score("4k3/R7/8/8/8/8/8/4K3 w - - 0 1");
++        let b = score("4k3/8/8/8/8/8/r7/4K3 w - - 0 1");
++        assert_eq!(w, -b);
++        assert_eq!(w, OPEN_FILE_MG + SEVENTH_MG);
++    }
++}

@@ -1,0 +1,165 @@
+diff --git a/src/search/history.rs b/src/search/history.rs
+index e154e4b..8c2b997 100644
+--- a/src/search/history.rs
++++ b/src/search/history.rs
+@@ -25,6 +25,8 @@ fn history_bonus(depth: i32) -> i32 {
+ pub struct HistoryTable {
+     /// History scores: [color][from_square][to_square]
+     history: [[[i32; 64]; 64]; 2],
++    /// Capture history scores: [color][attacker piece type][to_square][captured piece type]
++    capture: [[[[i32; 6]; 64]; 6]; 2],
+ }
+ 
+ impl HistoryTable {
+@@ -32,11 +34,13 @@ impl HistoryTable {
+     pub fn new() -> Self {
+         Self {
+             history: [[[0; 64]; 64]; 2],
++            capture: [[[[0; 6]; 64]; 6]; 2],
+         }
+     }
+ 
+     /// Clear all history scores (call at start of new game).
+     pub fn clear(&mut self) {
++        self.capture = [[[[0; 6]; 64]; 6]; 2];
+         for color in &mut self.history {
+             for from in color {
+                 for to in from {
+@@ -101,6 +105,9 @@ impl HistoryTable {
+     /// overflow and maintain relevance of recent moves.
+     /// Divides all scores by 2.
+     pub fn age(&mut self) {
++        for v in self.capture.iter_mut().flatten().flatten().flatten() {
++            *v /= 2;
++        }
+         for color in &mut self.history {
+             for from in color {
+                 for to in from {
+@@ -133,6 +140,42 @@ impl HistoryTable {
+     }
+ }
+ 
++impl HistoryTable {
++    /// Capture history score; 0 for non-captures.
++    #[inline]
++    pub fn get_capture(&self, color: Color, mv: &Move) -> i32 {
++        match mv.captured {
++            Some(c) => {
++                self.capture[color as usize][mv.piece.piece_type as usize][mv.to.index()]
++                    [c.piece_type as usize]
++            }
++            None => 0,
++        }
++    }
++
++    /// Apply a signed, gravity-scaled bonus to a capture (negative = malus).
++    fn bump_capture(&mut self, color: Color, mv: &Move, bonus: i32) {
++        if let Some(c) = mv.captured {
++            let e = &mut self.capture[color as usize][mv.piece.piece_type as usize][mv.to.index()]
++                [c.piece_type as usize];
++            *e = (*e + bonus - (*e * bonus.abs() / MAX_HISTORY_SCORE))
++                .clamp(-MAX_HISTORY_SCORE, MAX_HISTORY_SCORE);
++        }
++    }
++
++    /// Reward the capture that cut off and penalise the captures that failed before it.
++    /// `best_move` is `None` when a quiet move cut off (captures only get the malus).
++    pub fn update_captures(&mut self, color: Color, best_move: Option<&Move>, failed: &[Move], depth: i32) {
++        let bonus = history_bonus(depth);
++        if let Some(mv) = best_move {
++            self.bump_capture(color, mv, bonus);
++        }
++        for mv in failed {
++            self.bump_capture(color, mv, -bonus);
++        }
++    }
++}
++
+ impl Default for HistoryTable {
+     fn default() -> Self {
+         Self::new()
+diff --git a/src/search/mod.rs b/src/search/mod.rs
+index 66cc6fe..296ca08 100644
+--- a/src/search/mod.rs
++++ b/src/search/mod.rs
+@@ -791,6 +791,9 @@ impl SearchEngine {
+         // behavior is identical to the unbounded Vec.
+         let mut quiets_tried = [Move::NONE; MAX_MOVES];
+         let mut quiets_len = 0usize;
++        // Captures that failed to beat alpha, for capture history maluses.
++        let mut caps_tried = [Move::NONE; MAX_MOVES];
++        let mut caps_len = 0usize;
+ 
+         // Futility pruning conditions
+         let can_futility_prune = !is_pv
+@@ -896,6 +899,11 @@ impl SearchEngine {
+                 }
+             }
+ 
++            if is_capture && score <= alpha && caps_len < caps_tried.len() {
++                caps_tried[caps_len] = mv;
++                caps_len += 1;
++            }
++
+             // Update best score.
+             if score > best_score {
+                 best_score = score;
+@@ -926,6 +934,14 @@ impl SearchEngine {
+                     if score >= beta {
+                         self.stats.beta_cutoffs += 1;
+ 
++                        // Capture history: bonus for a capture cutoff, malus for failed captures.
++                        self.history.update_captures(
++                            board.side_to_move(),
++                            is_capture.then_some(&mv),
++                            &caps_tried[..caps_len],
++                            depth,
++                        );
++
+                         // Update heuristics for quiet moves.
+                         if !is_capture {
+                             self.update_cutoff_heuristics(
+diff --git a/src/search/move_ordering.rs b/src/search/move_ordering.rs
+index 2347812..d61677d 100644
+--- a/src/search/move_ordering.rs
++++ b/src/search/move_ordering.rs
+@@ -44,6 +44,9 @@ pub mod scores {
+     pub const BAD_CAPTURE: i32 = -50_000_000;
+ }
+ 
++/// Divisor applied to capture history (+-16384) before adding it to the MVV-LVA score.
++const CAPTURE_HISTORY_DIV: i32 = 64;
++
+ /// Piece values for SEE (Static Exchange Evaluation).
+ /// Using standard centipawn values.
+ pub const SEE_PIECE_VALUES: [i32; 6] = [
+@@ -160,7 +163,8 @@ impl MoveOrderer {
+             // identical to eager scoring while most SEEs are never run.
+             if mv.captured.is_some() {
+                 self.moves[i].score = scores::GOOD_CAPTURE
+-                    + mvv_lva_score(mv.piece.piece_type, mv.captured.unwrap().piece_type);
++                    + mvv_lva_score(mv.piece.piece_type, mv.captured.unwrap().piece_type)
++                    + history.get_capture(color, &mv) / CAPTURE_HISTORY_DIV;
+                 self.moves[i].needs_see = true;
+                 continue;
+             }
+@@ -215,14 +219,11 @@ impl MoveOrderer {
+                 let mv = self.moves[best_idx].mv;
+                 let see_score = see(board, &mv);
+                 self.moves[best_idx].needs_see = false;
+-                self.moves[best_idx].score = if see_score >= 0 {
+-                    // Good capture: base score + MVV-LVA for ordering among good captures.
+-                    scores::GOOD_CAPTURE
+-                        + mvv_lva_score(mv.piece.piece_type, mv.captured.unwrap().piece_type)
+-                } else {
+-                    // Bad capture: negative score.
+-                    scores::BAD_CAPTURE + see_score
+-                };
++                // Good captures keep the provisional score (MVV-LVA + capture history);
++                // bad captures drop to a negative score.
++                if see_score < 0 {
++                    self.moves[best_idx].score = scores::BAD_CAPTURE + see_score;
++                }
+                 continue;
+             }
+ 

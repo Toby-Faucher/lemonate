@@ -1,0 +1,24 @@
+{
+  "baseline_commit": "9e89100d5de0f2d7bc783e0d8ba7ab027d5c41fe",
+  "candidate_commit": "1a5479054d2206d1cef95fff6ca86fbc0ddb55c1",
+  "config_hash": "bench-sprt",
+  "gate": {
+    "preflight": "skipped",
+    "build": "pass",
+    "test": "skipped",
+    "perft": "skipped",
+    "sprt": "fail"
+  },
+  "sprt": {
+    "games": 4000,
+    "wins": 1425,
+    "losses": 1262,
+    "draws": 1313,
+    "elo": 14.2,
+    "elo_err": 8.8,
+    "llr": null,
+    "verdict": "inconclusive"
+  },
+  "status": "inconclusive",
+  "reason": "SPRT bounds [0, 5] run with bench/sprt.py, not research/scripts/gate.sh"
+}
