@@ -3,3 +3,13 @@
 
 [allow.no-fixed-sleep]
 "src/search/time_manager.rs" = 4
+
+[allow.no-ignored-test]
+"src/magic/mod.rs" = 1
+
+[allow.no-silent-skip]
+"src/book/mod.rs" = 4
+
+[allow.no-weak-result-assert]
+"src/board/fen.rs" = 2
+"src/book/mod.rs" = 1
