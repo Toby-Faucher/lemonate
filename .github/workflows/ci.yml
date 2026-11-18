@@ -67,3 +67,20 @@ jobs:
           for t in test_catalog test_cfg test_result test_sprt_parse; do python3 -m unittest $t; done
       - name: Scripts parse
         run: python3 -m py_compile bench/*.py research/scripts/*.py
+
+  caltrop:
+    name: caltrop
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      # Rule changes change the counts, so caltrop and ast-grep are pinned. Bump with caltrop.toml in the same PR.
+      CALTROP_REF: f3dc3f8ce01d3b617bf04498d6082996afc8f138
+    steps:
+      - uses: actions/checkout@v4
+      # Cloned outside the checkout so caltrop is not scanned.
+      - run: |
+          git clone https://github.com/Toby-Faucher/caltrop "$RUNNER_TEMP/caltrop"
+          git -C "$RUNNER_TEMP/caltrop" checkout "$CALTROP_REF"
+          pipx install ast-grep-cli==0.44.1
+          echo "$RUNNER_TEMP/caltrop" >> "$GITHUB_PATH"
+      - run: caltrop check

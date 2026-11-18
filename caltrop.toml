@@ -1,0 +1,5 @@
+[allow.no-deadline-poll]
+"tests/uci.rs" = 1
+
+[allow.no-fixed-sleep]
+"src/search/time_manager.rs" = 4
